@@ -12,3 +12,7 @@ safetensors>=0.4.0
 huggingface_hub>=0.20.0
 einops>=0.7.0
 numpy>=1.24.0
+
+# Neuronpedia integration
+requests>=2.31.0
+python-dotenv>=1.0.0

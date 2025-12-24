@@ -723,6 +723,7 @@ button:disabled {
 }
 
 .layer-btn {
+    position: relative;
     padding: 4px 12px;
     font-size: 0.75rem;
     font-weight: 500;
@@ -823,13 +824,14 @@ button:disabled {
 
 .diff-feature-item {
     display: grid;
-    grid-template-columns: 80px 1fr 80px 80px 40px;
+    grid-template-columns: 80px 1fr 80px 80px;
     align-items: center;
     gap: 12px;
     padding: 10px 12px;
     background: var(--bg-tertiary);
     border-radius: var(--radius-md);
     margin-bottom: 6px;
+    border: 1px solid var(--border-color);
     border-left: 3px solid transparent;
 }
 
@@ -964,13 +966,14 @@ button:disabled {
 
 .refusal-feature-item {
     display: grid;
-    grid-template-columns: 80px 100px 100px 40px;
+    grid-template-columns: 80px 1fr 1fr;
     align-items: center;
     gap: 12px;
     padding: 8px 12px;
     background: var(--bg-tertiary);
     border-radius: var(--radius-md);
     margin-bottom: 6px;
+    border: 1px solid var(--border-color);
 }
 
 .refusal-feature-item .feature-id {
@@ -1064,4 +1067,540 @@ button:disabled {
     margin-top: 12px;
     padding-top: 12px;
     border-top: 1px solid var(--border-color);
+}
+
+/* =============================================================================
+   Neuronpedia Integration Styles
+   ============================================================================= */
+
+/* Neuronpedia link in title */
+.np-link {
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    background: var(--accent-blue);
+    color: white;
+    border-radius: var(--radius-sm);
+    text-decoration: none;
+    margin-left: 8px;
+    font-weight: 500;
+}
+
+.np-link:hover {
+    background: var(--accent-cyan);
+}
+
+/* Neuronpedia sections */
+.np-section {
+    margin-top: 16px;
+    padding: 12px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-color);
+}
+
+.np-section-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.np-section-title.positive {
+    color: var(--accent-green);
+}
+
+.np-section-title.negative {
+    color: var(--accent-red);
+}
+
+/* Explanations section */
+.explanations-section {
+    background: linear-gradient(135deg, var(--bg-tertiary), rgba(45, 212, 191, 0.05));
+}
+
+.explanation-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 8px 10px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-sm);
+    margin-bottom: 6px;
+    border-left: 3px solid var(--accent-cyan);
+}
+
+.explanation-text {
+    flex: 1;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    line-height: 1.4;
+}
+
+.exp-score {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    background: var(--accent-cyan);
+    color: var(--bg-primary);
+    border-radius: var(--radius-sm);
+    font-weight: 600;
+    margin-left: 8px;
+}
+
+/* Logits section (positive/negative) */
+.logits-section {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.logits-column {
+    background: var(--bg-secondary);
+    padding: 10px;
+    border-radius: var(--radius-sm);
+}
+
+.logits-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.logit-item {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 0.8rem;
+    gap: 6px;
+}
+
+.logit-item.positive {
+    background: rgba(34, 197, 94, 0.15);
+    border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.logit-item.negative {
+    background: rgba(239, 68, 68, 0.15);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.logit-token {
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+    padding: 1px 4px;
+    border-radius: 2px;
+}
+
+.logit-value {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+}
+
+/* Top activations section */
+.activations-section {
+    background: linear-gradient(135deg, var(--bg-tertiary), rgba(255, 100, 50, 0.05));
+}
+
+.activations-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.activation-example {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 8px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-sm);
+    font-size: 0.8rem;
+    line-height: 1.6;
+    border-left: 3px solid var(--accent-orange);
+}
+
+.act-token {
+    padding: 1px 2px;
+    border-radius: 2px;
+    font-family: var(--font-mono);
+}
+
+.act-token.max-token {
+    font-weight: 700;
+    text-decoration: underline;
+    text-decoration-color: var(--accent-orange);
+}
+
+.act-value {
+    margin-left: auto;
+    padding: 2px 8px;
+    background: var(--accent-orange);
+    color: white;
+    border-radius: var(--radius-sm);
+    font-size: 0.75rem;
+    font-weight: 600;
+    font-family: var(--font-mono);
+}
+
+/* Error display */
+.np-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: var(--radius-sm);
+    color: var(--accent-red);
+    font-size: 0.8rem;
+    margin-top: 12px;
+}
+
+.error-icon {
+    width: 18px;
+    height: 18px;
+    background: var(--accent-red);
+    color: white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 0.7rem;
+}
+
+/* Make detail group title flex for NP link */
+.detail-group-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+/* =============================================================================
+   Lazy Loading Layer Button States
+   ============================================================================= */
+
+.layer-btn.loading {
+    opacity: 0.7;
+    cursor: wait;
+    position: relative;
+}
+
+.layer-btn.loading::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    right: 4px;
+    width: 10px;
+    height: 10px;
+    border: 2px solid transparent;
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+.layer-btn.loaded {
+    border-color: var(--accent-green);
+}
+
+.layer-btn.loaded::before {
+    content: '';
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 6px;
+    height: 6px;
+    background: var(--accent-green);
+    border-radius: 50%;
+}
+
+@keyframes spin {
+    to { transform: translateY(-50%) rotate(360deg); }
+}
+
+/* =============================================================================
+   Neuronpedia Embedded Content
+   ============================================================================= */
+
+.np-embed-section {
+    margin-top: 16px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    background: var(--bg-secondary);
+}
+
+.np-embed-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.np-embed-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--accent-purple);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.np-embed-toggle {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    font-size: 1.1rem;
+    line-height: 1;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.np-embed-toggle:hover {
+    background: var(--bg-highlight);
+    color: var(--text-primary);
+    border-color: var(--accent-blue);
+}
+
+.np-embed-container {
+    width: 100%;
+    height: 600px;
+    overflow: hidden;
+    transition: height 0.3s ease;
+}
+
+.np-embed-container.collapsed {
+    height: 0;
+}
+
+.np-embed-iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+    background: var(--bg-primary);
+}
+
+/* Fallback link when API fails */
+.np-fallback-link {
+    margin-left: auto;
+    color: var(--accent-purple);
+    text-decoration: none;
+    font-weight: 500;
+    padding: 4px 10px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    transition: all 0.15s;
+}
+
+.np-fallback-link:hover {
+    background: var(--accent-purple);
+    color: white;
+}
+
+/* Neuronpedia unavailable message */
+.np-unavailable {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 16px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    margin-top: 16px;
+}
+
+.np-unavailable-icon {
+    font-size: 1.2rem;
+    color: var(--accent-blue);
+    flex-shrink: 0;
+}
+
+.np-unavailable-text {
+    flex: 1;
+}
+
+.np-unavailable-text strong {
+    display: block;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    margin-bottom: 4px;
+}
+
+.np-unavailable-text p {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    margin: 0;
+}
+
+/* Responsive embed height */
+@media (max-width: 1400px) {
+    .np-embed-container {
+        height: 500px;
+    }
+}
+
+@media (max-width: 900px) {
+    .np-embed-container {
+        height: 450px;
+    }
+}
+
+/* =============================================================================
+   Split Panel Layout for Compare/Refusal/Batch Modes
+   ============================================================================= */
+
+.split-panel {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    min-height: 500px;
+}
+
+@media (max-width: 1200px) {
+    .split-panel {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Mode Feature Detail Panel */
+.mode-feature-detail {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 12px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.mode-feature-detail .placeholder {
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 0.85rem;
+    text-align: center;
+    padding: 40px 20px;
+}
+
+.mode-detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.mode-detail-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--accent-blue);
+    font-family: var(--font-mono);
+}
+
+.mode-feature-detail .np-embed-container {
+    flex: 1;
+    min-height: 350px;
+    height: auto;
+}
+
+/* Clickable Feature Items */
+.diff-feature-item.clickable,
+.refusal-feature-item.clickable,
+.ranking-row.clickable {
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.diff-feature-item.clickable:hover,
+.refusal-feature-item.clickable:hover {
+    background: var(--bg-highlight);
+    border-color: var(--accent-blue);
+}
+
+.ranking-row.clickable:hover {
+    background: var(--bg-highlight) !important;
+}
+
+/* Selected state */
+.diff-feature-item.selected,
+.refusal-feature-item.selected {
+    background: var(--bg-highlight);
+    border: 1px solid var(--accent-blue);
+    box-shadow: 0 0 0 1px var(--accent-blue);
+}
+
+.ranking-row.selected {
+    background: var(--bg-highlight) !important;
+    box-shadow: inset 3px 0 0 var(--accent-blue);
+}
+
+/* Adjust diff-results and refusal-features to scroll within split panel */
+/* Comparison Token Display */
+.compare-tokens-container {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 12px;
+}
+
+.compare-token-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.compare-token-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+}
+
+.compare-token-label.prompt-a-label {
+    color: var(--accent-red);
+    background: rgba(248, 81, 73, 0.1);
+    border: 1px solid rgba(248, 81, 73, 0.3);
+}
+
+.compare-token-label.prompt-b-label {
+    color: var(--accent-green);
+    background: rgba(63, 185, 80, 0.1);
+    border: 1px solid rgba(63, 185, 80, 0.3);
+}
+
+.token-display.compact {
+    font-size: 0.85rem;
+    line-height: 1.8;
+    padding: 12px;
+    min-height: 60px;
+    max-height: 150px;
+    overflow-y: auto;
+}
+
+@media (max-width: 900px) {
+    .compare-tokens-container {
+        grid-template-columns: 1fr;
+    }
+}
+
+.split-panel .diff-results {
+    max-height: 700px;
+    overflow-y: auto;
+}
+
+.split-panel .refusal-features,
+.split-panel .ranking-results {
+    max-height: 450px;
+    overflow-y: auto;
 }

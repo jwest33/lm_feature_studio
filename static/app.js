@@ -8,6 +8,8 @@ let currentAnalysis = null;
 let selectedFeatureId = null;
 let selectedLayer = null;  // Currently selected SAE layer
 let availableLayers = [];  // All available layers
+let neuronpediaLayers = []; // Layers that have Neuronpedia data
+let layerDataCache = {};   // Cache for lazy-loaded layer data
 
 // DOM Elements
 const promptInput = document.getElementById('prompt-input');
@@ -71,26 +73,45 @@ async function fetchConfig() {
         const response = await fetch('/api/config');
         const config = await response.json();
         availableLayers = config.sae_layers || [];
+        neuronpediaLayers = config.neuronpedia_layers || [];
         if (availableLayers.length > 0 && selectedLayer === null) {
             selectedLayer = availableLayers[0];
         }
-        configInfo.textContent = `Layers ${availableLayers.join(', ')} | ${config.sae_width} SAE | ${config.device.toUpperCase()}`;
+        const npLayersInfo = neuronpediaLayers.length > 0 ? ` | NP: ${neuronpediaLayers.join(', ')}` : '';
+        configInfo.textContent = `Layers ${availableLayers.join(', ')} | ${config.sae_width} SAE | ${config.device.toUpperCase()}${npLayersInfo}`;
     } catch (error) {
         configInfo.textContent = 'Config unavailable';
     }
 }
 
-// Helper to get current layer's data
-function getLayerData() {
-    if (!currentAnalysis || !selectedLayer) return null;
-    return currentAnalysis.layers[selectedLayer];
+// Check if a layer has Neuronpedia data
+function hasNeuronpediaData(layer) {
+    return neuronpediaLayers.includes(layer);
 }
 
-async function analyzePrompt(prompt) {
+// Helper to get current layer's data (from cache or analysis)
+function getLayerData() {
+    if (!currentPrompt || !selectedLayer) return null;
+
+    // Check lazy-loaded cache first
+    const cacheKey = `${currentPrompt}_${selectedLayer}`;
+    if (layerDataCache[cacheKey]) {
+        return layerDataCache[cacheKey];
+    }
+
+    // Fall back to full analysis data (non-lazy mode)
+    if (currentAnalysis && currentAnalysis.layers) {
+        return currentAnalysis.layers[selectedLayer];
+    }
+
+    return null;
+}
+
+async function analyzePrompt(prompt, lazy = true) {
     const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, top_k: 10 })
+        body: JSON.stringify({ prompt, top_k: 10, lazy })
     });
 
     if (!response.ok) {
@@ -99,6 +120,29 @@ async function analyzePrompt(prompt) {
     }
 
     return response.json();
+}
+
+async function fetchLayerData(prompt, layer) {
+    // Check cache first
+    const cacheKey = `${prompt}_${layer}`;
+    if (layerDataCache[cacheKey]) {
+        return layerDataCache[cacheKey];
+    }
+
+    const response = await fetch('/api/analyze/layer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, layer, top_k: 10 })
+    });
+
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Layer analysis failed');
+    }
+
+    const data = await response.json();
+    layerDataCache[cacheKey] = data;
+    return data;
 }
 
 async function fetchFeatureInfo(prompt, featureId, layer = null) {
@@ -111,6 +155,17 @@ async function fetchFeatureInfo(prompt, featureId, layer = null) {
     if (!response.ok) {
         const error = await response.json();
         throw new Error(error.error || 'Feature fetch failed');
+    }
+
+    return response.json();
+}
+
+async function fetchNeuronpediaData(featureId, layer) {
+    const response = await fetch(`/api/neuronpedia/${layer}/${featureId}`);
+
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Neuronpedia fetch failed');
     }
 
     return response.json();
@@ -250,27 +305,62 @@ function renderLayerSelector() {
 
     // Add click handlers
     layerContainer.querySelectorAll('.layer-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', async () => {
             const layer = parseInt(btn.dataset.layer);
             if (layer !== selectedLayer) {
                 selectedLayer = layer;
-                onLayerChange();
+                await onLayerChange();
             }
         });
     });
 }
 
-function onLayerChange() {
+async function onLayerChange() {
     // Update layer selector UI
     const layerContainer = document.getElementById('layer-selector-container');
+    const currentBtn = layerContainer?.querySelector(`[data-layer="${selectedLayer}"]`);
+
     if (layerContainer) {
         layerContainer.querySelectorAll('.layer-btn').forEach(btn => {
             btn.classList.toggle('selected', parseInt(btn.dataset.layer) === selectedLayer);
         });
     }
 
-    // Re-render with new layer data
-    const layerData = getLayerData();
+    if (!currentPrompt) return;
+
+    // Check if we already have this layer's data
+    let layerData = getLayerData();
+
+    if (!layerData) {
+        // Lazy load this layer's SAE data
+        setStatus(`Loading layer ${selectedLayer} SAE weights...`);
+
+        // Show loading state on button
+        if (currentBtn) {
+            currentBtn.classList.add('loading');
+            currentBtn.textContent = `${selectedLayer}...`;
+        }
+
+        try {
+            layerData = await fetchLayerData(currentPrompt, selectedLayer);
+
+            // Mark as loaded
+            if (currentBtn) {
+                currentBtn.classList.remove('loading');
+                currentBtn.classList.add('loaded');
+                currentBtn.textContent = selectedLayer;
+            }
+        } catch (error) {
+            if (currentBtn) {
+                currentBtn.classList.remove('loading');
+                currentBtn.textContent = selectedLayer;
+            }
+            setStatus(`Error loading layer ${selectedLayer}: ${error.message}`);
+            return;
+        }
+    }
+
+    // Re-render with layer data
     if (layerData && currentAnalysis) {
         // Default to first top global feature of new layer
         const defaultFeature = layerData.top_features_global[0]?.id || 0;
@@ -337,8 +427,12 @@ async function selectFeature(featureId) {
     if (currentPrompt) {
         setStatus(`Loading feature #${featureId}...`);
         try {
-            const info = await fetchFeatureInfo(currentPrompt, featureId);
-            renderFeatureDetails(info);
+            // Fetch local feature info and Neuronpedia data in parallel
+            const [info, npData] = await Promise.all([
+                fetchFeatureInfo(currentPrompt, featureId),
+                fetchNeuronpediaData(featureId, selectedLayer).catch(e => ({ error: e.message }))
+            ]);
+            renderFeatureDetails(info, npData);
             setStatus('Ready');
         } catch (error) {
             setStatus(`Error: ${error.message}`);
@@ -346,10 +440,17 @@ async function selectFeature(featureId) {
     }
 }
 
-function renderFeatureDetails(info) {
+function renderFeatureDetails(info, npData = null) {
+    // Build Neuronpedia URLs
+    const npUrl = npData?.neuronpedia_url || `https://www.neuronpedia.org/gemma-3-4b-it/${selectedLayer}-gemmascope-res-65k/${info.feature_id}`;
+    const npEmbedUrl = npData?.neuronpedia_embed_url || buildEmbedUrl(info.feature_id, selectedLayer);
+
     let html = `
         <div class="detail-group">
-            <div class="detail-group-title">Feature Statistics</div>
+            <div class="detail-group-title">
+                Feature Statistics
+                <a href="${npUrl}" target="_blank" class="np-link" title="View on Neuronpedia">Open NP</a>
+            </div>
             <div class="detail-row">
                 <span class="detail-label">Feature ID</span>
                 <span class="detail-value highlight">#${info.feature_id}</span>
@@ -366,13 +467,27 @@ function renderFeatureDetails(info) {
                 <span class="detail-label">Mean Activation</span>
                 <span class="detail-value">${formatNumber(info.mean_activation, 4)}</span>
             </div>
-        </div>
     `;
 
+    // Add Neuronpedia stats if available
+    if (npData && !npData.error) {
+        if (npData.frac_nonzero) {
+            html += `
+                <div class="detail-row">
+                    <span class="detail-label">Activation Density</span>
+                    <span class="detail-value">${(npData.frac_nonzero * 100).toFixed(3)}%</span>
+                </div>
+            `;
+        }
+    }
+
+    html += `</div>`;
+
+    // Local top tokens (from unembedding)
     if (info.top_tokens && info.top_tokens.length > 0) {
         html += `
             <div class="top-tokens-section">
-                <h3>Predicted Tokens (Unembedding)</h3>
+                <h3>Predicted Tokens (Local Unembedding)</h3>
                 <p class="hint">Tokens this feature promotes when active</p>
                 <div class="top-tokens-grid">
         `;
@@ -390,7 +505,118 @@ function renderFeatureDetails(info) {
         `;
     }
 
+    // Embedded Neuronpedia content
+    if (npData && !npData.error) {
+        html += `
+            <div class="np-embed-section">
+                <div class="np-embed-header">
+                    <span class="np-embed-title">Neuronpedia</span>
+                    <button class="np-embed-toggle" onclick="toggleNpEmbed()" title="Toggle embed visibility">−</button>
+                </div>
+                <div class="np-embed-container" id="np-embed-container">
+                    <iframe
+                        src="${npEmbedUrl}"
+                        class="np-embed-iframe"
+                        frameborder="0"
+                        loading="lazy"
+                        allow="clipboard-write"
+                        title="Neuronpedia Feature #${info.feature_id}"
+                    ></iframe>
+                </div>
+            </div>
+        `;
+    } else if (npData && npData.unsupported_layer) {
+        // Layer not available on Neuronpedia
+        html += `
+            <div class="np-unavailable">
+                <span class="np-unavailable-icon">ℹ</span>
+                <div class="np-unavailable-text">
+                    <strong>Neuronpedia data not available for layer ${selectedLayer}</strong>
+                    <p>Supported layers: ${npData.supported_layers?.join(', ') || neuronpediaLayers.join(', ')}</p>
+                </div>
+            </div>
+        `;
+    } else if (npData && npData.error) {
+        // Show error and fallback to direct link
+        html += `
+            <div class="np-error">
+                <span class="error-icon">!</span>
+                Neuronpedia API: ${escapeHtml(npData.error)}
+                <a href="${npUrl}" target="_blank" class="np-fallback-link">Open in Neuronpedia →</a>
+            </div>
+        `;
+    }
+
     featureDetails.innerHTML = html;
+}
+
+// Build embed URL fallback (when API doesn't return one)
+function buildEmbedUrl(featureId, layer) {
+    const modelId = 'gemma-3-4b-it';
+    const sourceId = `${layer}-gemmascope-2-res-262k`;
+    // Using only documented embed parameters
+    const params = [
+        'embed=true',
+        'embedexplanation=true',
+        'embedplots=true',
+        'embedtest=true'
+    ].join('&');
+    return `https://www.neuronpedia.org/${modelId}/${sourceId}/${featureId}?${params}`;
+}
+
+// Toggle embed visibility
+function toggleNpEmbed() {
+    const container = document.getElementById('np-embed-container');
+    const toggle = document.querySelector('.np-embed-toggle');
+    if (container.classList.contains('collapsed')) {
+        container.classList.remove('collapsed');
+        toggle.textContent = '−';
+    } else {
+        container.classList.add('collapsed');
+        toggle.textContent = '+';
+    }
+}
+
+// Render feature detail with Neuronpedia embed for Compare/Refusal/Batch modes
+function renderModeFeatureDetail(containerId, featureId, layer, npUrl) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    // Check if layer has Neuronpedia data
+    if (!hasNeuronpediaData(layer)) {
+        container.innerHTML = `
+            <div class="mode-detail-header">
+                <span class="mode-detail-title">Feature #${featureId} (Layer ${layer})</span>
+            </div>
+            <div class="np-unavailable">
+                <span class="np-unavailable-icon">ℹ</span>
+                <div class="np-unavailable-text">
+                    <strong>Neuronpedia data not available for layer ${layer}</strong>
+                    <p>Supported layers: ${neuronpediaLayers.join(', ')}</p>
+                </div>
+            </div>
+        `;
+        return;
+    }
+
+    const embedUrl = buildEmbedUrl(featureId, layer);
+
+    container.innerHTML = `
+        <div class="mode-detail-header">
+            <span class="mode-detail-title">Feature #${featureId} (Layer ${layer})</span>
+            <a href="${npUrl}" target="_blank" class="np-link" title="Open in Neuronpedia">Open NP</a>
+        </div>
+        <div class="np-embed-container" id="mode-embed-container-${containerId}">
+            <iframe
+                src="${embedUrl}"
+                class="np-embed-iframe"
+                frameborder="0"
+                loading="lazy"
+                allow="clipboard-write"
+                title="Neuronpedia Feature #${featureId}"
+            ></iframe>
+        </div>
+    `;
 }
 
 function renderSteerOutput(result) {
@@ -498,11 +724,13 @@ analyzeForm.addEventListener('submit', async (e) => {
     if (!prompt) return;
 
     currentPrompt = prompt;
+    layerDataCache = {};  // Clear cache for new prompt
     setLoading(analyzeBtn, true);
     setStatus('Analyzing prompt...');
 
     try {
-        currentAnalysis = await analyzePrompt(prompt);
+        // Use lazy loading - only get tokens and available layers first
+        currentAnalysis = await analyzePrompt(prompt, true);
 
         // Set available layers and select first one if not set
         availableLayers = currentAnalysis.available_layers || [];
@@ -513,10 +741,14 @@ analyzeForm.addEventListener('submit', async (e) => {
         // Render layer selector
         renderLayerSelector();
 
-        const layerData = getLayerData();
-        if (!layerData) {
-            throw new Error('No layer data available');
-        }
+        // Show tokens placeholder while loading first layer
+        tokenDisplay.innerHTML = '<span class="placeholder">Loading layer data...</span>';
+        featureList.innerHTML = '<span class="placeholder">Loading...</span>';
+
+        setStatus(`Tokenized ${currentAnalysis.num_tokens} tokens. Loading layer ${selectedLayer}...`);
+
+        // Now lazy-load only the first selected layer
+        const layerData = await fetchLayerData(prompt, selectedLayer);
 
         // Default to first top global feature
         const defaultFeature = layerData.top_features_global[0]?.id || 0;
@@ -530,7 +762,7 @@ analyzeForm.addEventListener('submit', async (e) => {
         // Auto-select first feature
         selectFeature(defaultFeature);
 
-        setStatus(`Analyzed ${currentAnalysis.num_tokens} tokens across ${availableLayers.length} layers`);
+        setStatus(`Analyzed ${currentAnalysis.num_tokens} tokens - layer ${selectedLayer} loaded`);
     } catch (error) {
         setStatus(`Error: ${error.message}`);
         tokenDisplay.innerHTML = `<span class="placeholder" style="color: var(--accent-red)">Error: ${escapeHtml(error.message)}</span>`;
@@ -679,6 +911,51 @@ function renderLayerTabs(containerId, layers, selectedLayer, onSelect) {
     });
 }
 
+// Render comparison token activations for a specific feature
+function renderComparisonTokens(result, layer, featureId) {
+    const layerData = result.layers[layer];
+    if (!layerData) return;
+
+    const tokensA = result.tokens_a;
+    const tokensB = result.tokens_b;
+    const actsA = layerData.token_activations_a?.[featureId] || [];
+    const actsB = layerData.token_activations_b?.[featureId] || [];
+
+    // Find max activation across both prompts for normalization
+    const maxAct = Math.max(...actsA, ...actsB, 0.001);
+
+    // Render tokens A
+    const containerA = document.getElementById('compare-tokens-a');
+    let htmlA = '';
+    tokensA.forEach((token, i) => {
+        const act = actsA[i] || 0;
+        const normalized = act / maxAct;
+        const isBos = i === 0;
+        const bgColor = isBos ? 'transparent' : `rgba(255, 100, 50, ${Math.min(normalized, 1) * 0.8})`;
+        const className = isBos ? 'token bos' : 'token';
+        const displayToken = isBos ? 'BOS' : escapeHtml(token);
+        htmlA += `<span class="${className}" style="background-color: ${bgColor}" title="Activation: ${act.toFixed(4)}">${displayToken}</span>`;
+    });
+    containerA.innerHTML = htmlA;
+
+    // Render tokens B
+    const containerB = document.getElementById('compare-tokens-b');
+    let htmlB = '';
+    tokensB.forEach((token, i) => {
+        const act = actsB[i] || 0;
+        const normalized = act / maxAct;
+        const isBos = i === 0;
+        const bgColor = isBos ? 'transparent' : `rgba(255, 100, 50, ${Math.min(normalized, 1) * 0.8})`;
+        const className = isBos ? 'token bos' : 'token';
+        const displayToken = isBos ? 'BOS' : escapeHtml(token);
+        htmlB += `<span class="${className}" style="background-color: ${bgColor}" title="Activation: ${act.toFixed(4)}">${displayToken}</span>`;
+    });
+    containerB.innerHTML = htmlB;
+
+    // Show legend
+    document.getElementById('compare-token-legend').classList.remove('hidden');
+}
+
 // Render comparison results
 function renderComparisonResults(result, layer) {
     const container = document.getElementById('diff-results');
@@ -700,7 +977,10 @@ function renderComparisonResults(result, layer) {
         const barWidthB = (feat.activation_b / maxAct) * 100;
 
         html += `
-            <div class="diff-feature-item ${isPositive ? 'positive' : 'negative'}">
+            <div class="diff-feature-item clickable ${isPositive ? 'positive' : 'negative'}"
+                 data-feature-id="${feat.feature_id}"
+                 data-layer="${layer}"
+                 data-np-url="${feat.neuronpedia_url}">
                 <span class="feature-id">#${feat.feature_id}</span>
                 <div class="diff-bar-container">
                     <div class="diff-bar">
@@ -712,12 +992,40 @@ function renderComparisonResults(result, layer) {
                 </div>
                 <span class="diff-value">${isPositive ? '+' : ''}${feat.mean_diff.toFixed(3)}</span>
                 <span class="ratio-value">x${feat.ratio.toFixed(2)}</span>
-                <a href="${feat.neuronpedia_url}" target="_blank" class="neuronpedia-link" title="View on Neuronpedia">NP</a>
             </div>
         `;
     });
 
     container.innerHTML = html;
+
+    // Add click handlers for feature items
+    container.querySelectorAll('.diff-feature-item.clickable').forEach(el => {
+        el.addEventListener('click', () => {
+            // Remove selected class from all items
+            container.querySelectorAll('.diff-feature-item').forEach(item => item.classList.remove('selected'));
+            // Add selected class to clicked item
+            el.classList.add('selected');
+
+            const featureId = parseInt(el.dataset.featureId);
+            const featLayer = parseInt(el.dataset.layer);
+            const npUrl = el.dataset.npUrl;
+
+            // Render token activations for this feature
+            renderComparisonTokens(result, featLayer, featureId);
+
+            // Render Neuronpedia detail
+            renderModeFeatureDetail('diff-feature-detail', featureId, featLayer, npUrl);
+        });
+    });
+
+    // Auto-select first feature to show token activations
+    const firstFeature = layerData.differential_features[0];
+    if (firstFeature) {
+        renderComparisonTokens(result, layer, firstFeature.feature_id);
+        // Mark first item as selected
+        const firstItem = container.querySelector('.diff-feature-item');
+        if (firstItem) firstItem.classList.add('selected');
+    }
 }
 
 // Render refusal results
@@ -744,16 +1052,33 @@ function renderRefusalResults(result, layer) {
     let html = '';
     layerData.refusal_correlated_features.forEach(feat => {
         html += `
-            <div class="refusal-feature-item">
+            <div class="refusal-feature-item clickable"
+                 data-feature-id="${feat.feature_id}"
+                 data-layer="${layer}"
+                 data-np-url="${feat.neuronpedia_url}">
                 <span class="feature-id">#${feat.feature_id}</span>
                 <span class="correlation-score">corr: ${feat.correlation_score.toFixed(4)}</span>
                 <span class="diff-value">mean: ${feat.mean_activation.toFixed(4)}</span>
-                <a href="${feat.neuronpedia_url}" target="_blank" class="neuronpedia-link">NP</a>
             </div>
         `;
     });
 
     featuresContainer.innerHTML = html;
+
+    // Add click handlers for feature items
+    featuresContainer.querySelectorAll('.refusal-feature-item.clickable').forEach(el => {
+        el.addEventListener('click', () => {
+            // Remove selected class from all items
+            featuresContainer.querySelectorAll('.refusal-feature-item').forEach(item => item.classList.remove('selected'));
+            // Add selected class to clicked item
+            el.classList.add('selected');
+
+            const featureId = parseInt(el.dataset.featureId);
+            const featLayer = parseInt(el.dataset.layer);
+            const npUrl = el.dataset.npUrl;
+            renderModeFeatureDetail('refusal-feature-detail', featureId, featLayer, npUrl);
+        });
+    });
 }
 
 // Render ranking results
@@ -776,7 +1101,6 @@ function renderRankingResults(result, layer) {
                     <th>Harmful</th>
                     <th>Benign</th>
                     <th>Score</th>
-                    <th>Link</th>
                 </tr>
             </thead>
             <tbody>
@@ -784,20 +1108,37 @@ function renderRankingResults(result, layer) {
 
     layerData.ranked_features.forEach((feat, idx) => {
         html += `
-            <tr>
+            <tr class="ranking-row clickable"
+                data-feature-id="${feat.feature_id}"
+                data-layer="${layer}"
+                data-np-url="${feat.neuronpedia_url}">
                 <td>${idx + 1}</td>
                 <td class="feature-id">#${feat.feature_id}</td>
                 <td>${(feat.consistency_score * 100).toFixed(1)}%</td>
                 <td>${feat.mean_harmful_activation.toFixed(3)}</td>
                 <td>${feat.mean_benign_activation.toFixed(3)}</td>
                 <td>${feat.differential_score.toFixed(4)}</td>
-                <td><a href="${feat.neuronpedia_url}" target="_blank" class="neuronpedia-link">NP</a></td>
             </tr>
         `;
     });
 
     html += '</tbody></table>';
     container.innerHTML = html;
+
+    // Add click handlers for ranking rows
+    container.querySelectorAll('.ranking-row.clickable').forEach(el => {
+        el.addEventListener('click', () => {
+            // Remove selected class from all rows
+            container.querySelectorAll('.ranking-row').forEach(row => row.classList.remove('selected'));
+            // Add selected class to clicked row
+            el.classList.add('selected');
+
+            const featureId = parseInt(el.dataset.featureId);
+            const featLayer = parseInt(el.dataset.layer);
+            const npUrl = el.dataset.npUrl;
+            renderModeFeatureDetail('ranking-feature-detail', featureId, featLayer, npUrl);
+        });
+    });
 }
 
 // Export functions

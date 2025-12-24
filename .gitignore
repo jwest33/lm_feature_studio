@@ -1,3 +1,8 @@
 harmful.txt
 harmless.txt
 activations_output/
+__pycache__/*
+.env
+.vscode/
+*claude*
+output/

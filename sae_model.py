@@ -5,14 +5,30 @@ Handles loading Gemma model and GemmaScope SAE, running inference,
 extracting activations, and steering generation.
 """
 
+import os
 import torch
 import torch.nn as nn
 import numpy as np
+import requests
 from functools import partial
 from typing import Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Neuronpedia configuration
+NEURONPEDIA_API_KEY = os.getenv("NEURONPEDIA_API_KEY")
+NEURONPEDIA_BASE_URL = "https://www.neuronpedia.org/api"
+
+# Cache for Neuronpedia data to avoid repeated API calls
+_neuronpedia_cache: dict[str, dict] = {}
+
+# Cache for residual activations to avoid re-running model
+_residual_cache: dict[str, dict] = {}
 
 
 # =============================================================================
@@ -23,17 +39,23 @@ from safetensors.torch import load_file
 #MODEL_PATH = "D:\\huggingface\\gemma-3-12b-it-null-space-abliterated"  # Local path
 
 # MODEL_PATH = "google/gemma-3-4b-it"  # HuggingFace (requires auth)
-MODEL_PATH = "D:\\models\\gemma-3-12b-it"
+MODEL_PATH = "D:\\models\\gemma-3-4b-it"
 
 # SAE Configuration
-SAE_REPO = "google/gemma-scope-2-12b-it"
-SAE_WIDTH = "65k"
-SAE_L0 = "medium"
+SAE_REPO = "google/gemma-scope-2-4b-it"
+SAE_WIDTH = "262k"
+SAE_L0 = "small"
 
 # Available SAE layers per model
 SAE_LAYERS_BY_MODEL = {
     "4b": [9, 17, 22, 29],
     "12b": [12, 24, 31, 41],
+}
+
+# Neuronpedia only has data for certain layers
+NEURONPEDIA_LAYERS_BY_MODEL = {
+    "4b": [9, 17],
+    "12b": [12],
 }
 
 # Auto-detect model size from repo name
@@ -46,7 +68,18 @@ def get_available_layers(repo: str) -> list[int]:
     # Default to 12b layers
     return SAE_LAYERS_BY_MODEL["12b"]
 
+
+def get_neuronpedia_layers(repo: str) -> list[int]:
+    """Get layers that have Neuronpedia data available."""
+    if "12b" in repo.lower():
+        return NEURONPEDIA_LAYERS_BY_MODEL["12b"]
+    elif "4b" in repo.lower():
+        return NEURONPEDIA_LAYERS_BY_MODEL["4b"]
+    return NEURONPEDIA_LAYERS_BY_MODEL["12b"]
+
+
 SAE_LAYERS = get_available_layers(SAE_REPO)
+NEURONPEDIA_LAYERS = get_neuronpedia_layers(SAE_REPO)
 
 
 # =============================================================================
@@ -387,6 +420,136 @@ class SAEModelManager:
             }
         }
 
+    def analyze_prompt_lazy(self, prompt: str) -> dict:
+        """
+        Initial analysis that only tokenizes and returns available layers.
+        Does NOT load any SAE weights - those are loaded on-demand via analyze_layer.
+
+        Args:
+            prompt: The text prompt to analyze
+
+        Returns:
+            Dictionary with tokens and available layers (no SAE data)
+        """
+        # Tokenize
+        inputs = self.tokenizer.encode(
+            prompt,
+            return_tensors="pt",
+            add_special_tokens=True
+        ).to(self.device)
+
+        # Get string tokens for display
+        str_tokens = self.tokenizer.convert_ids_to_tokens(inputs[0].tolist())
+        str_tokens = [t.replace("▁", " ").replace("<0x0A>", "\\n") for t in str_tokens]
+
+        # Cache residual activations for later layer analysis
+        cache_key = hash(prompt)
+        if cache_key not in _residual_cache:
+            residuals_by_layer = self.gather_residual_activations(inputs)
+            _residual_cache[cache_key] = {
+                "residuals": residuals_by_layer,
+                "tokens": str_tokens,
+                "inputs": inputs,
+            }
+
+        return {
+            "tokens": str_tokens,
+            "num_tokens": len(str_tokens),
+            "available_layers": self.sae_layers,
+            "sae_config": {
+                "width": self.sae_width,
+                "l0": self.sae_l0,
+            }
+        }
+
+    def analyze_layer(self, prompt: str, layer: int, top_k: int = 10) -> dict:
+        """
+        Analyze a specific layer for a prompt. Loads SAE weights on-demand.
+        Uses cached residual activations if available.
+
+        Args:
+            prompt: The text prompt to analyze
+            layer: The SAE layer index to analyze
+            top_k: Number of top features to return per token
+
+        Returns:
+            Dictionary with SAE activation data for this layer
+        """
+        if layer not in self.sae_layers:
+            raise ValueError(f"Layer {layer} not in available layers: {self.sae_layers}")
+
+        cache_key = hash(prompt)
+
+        # Check if we have cached residuals
+        if cache_key in _residual_cache:
+            cached = _residual_cache[cache_key]
+            residuals = cached["residuals"][layer]
+            str_tokens = cached["tokens"]
+        else:
+            # Need to run model (shouldn't happen in normal flow)
+            inputs = self.tokenizer.encode(
+                prompt,
+                return_tensors="pt",
+                add_special_tokens=True
+            ).to(self.device)
+
+            str_tokens = self.tokenizer.convert_ids_to_tokens(inputs[0].tolist())
+            str_tokens = [t.replace("▁", " ").replace("<0x0A>", "\\n") for t in str_tokens]
+
+            residuals_by_layer = self.gather_residual_activations(inputs, layers=[layer])
+            residuals = residuals_by_layer[layer]
+
+            # Cache for future layer requests
+            if cache_key not in _residual_cache:
+                # Run full model to cache all layers
+                full_residuals = self.gather_residual_activations(inputs)
+                _residual_cache[cache_key] = {
+                    "residuals": full_residuals,
+                    "tokens": str_tokens,
+                    "inputs": inputs,
+                }
+
+        # Load SAE for this layer (lazy - only loads if not already loaded)
+        sae = self.get_sae(layer)
+
+        # Encode with SAE
+        sae_acts = sae.encode(residuals.to(torch.float32))
+
+        # Get top features per token
+        top_acts_per_token, top_features_per_token = sae_acts.topk(top_k, dim=-1)
+
+        # Get globally top features (by mean activation across sequence)
+        mean_acts = sae_acts[1:].mean(dim=0)  # Skip BOS
+        top_global_acts, top_global_features = mean_acts.topk(top_k)
+
+        # Get max activating token for each global top feature
+        global_feature_info = []
+        for feat_idx, mean_act in zip(top_global_features.tolist(), top_global_acts.tolist()):
+            feat_acts = sae_acts[:, feat_idx]
+            max_pos = feat_acts.argmax().item()
+            max_act = feat_acts[max_pos].item()
+            global_feature_info.append({
+                "id": feat_idx,
+                "mean_activation": round(mean_act, 4),
+                "max_activation": round(max_act, 4),
+                "max_token_pos": max_pos,
+                "max_token": str_tokens[max_pos] if max_pos < len(str_tokens) else "?",
+            })
+
+        return {
+            "layer": layer,
+            "sae_acts": sae_acts.detach().cpu().numpy().tolist(),
+            "top_features_per_token": top_features_per_token.detach().cpu().numpy().tolist(),
+            "top_acts_per_token": top_acts_per_token.detach().cpu().numpy().tolist(),
+            "top_features_global": global_feature_info,
+            "num_features": sae_acts.shape[-1],
+        }
+
+    def clear_residual_cache(self):
+        """Clear the residual activation cache."""
+        global _residual_cache
+        _residual_cache.clear()
+
     def get_feature_activations(self, prompt: str, feature_id: int, layer: int = None) -> dict:
         """
         Get activation pattern for a specific feature across all tokens.
@@ -647,9 +810,146 @@ class SAEModelManager:
     # Refusal Pathway Analysis Methods
     # =========================================================================
 
+    def get_neuronpedia_model_id(self) -> str:
+        """Get the Neuronpedia model ID based on SAE repo."""
+        # Map SAE repo to Neuronpedia model ID
+        if "12b" in SAE_REPO.lower():
+            return "gemma-3-12b-it"
+        elif "4b" in SAE_REPO.lower():
+            return "gemma-3-4b-it"
+        return "gemma-3-12b-it"  # Default
+
+    def get_neuronpedia_source_id(self, layer: int) -> str:
+        """Get the Neuronpedia source/SAE ID for a layer."""
+        # Format: layer-{layer}-gemmascope-res-{width}
+        return f"{layer}-gemmascope-2-res-262k"
+
     def get_neuronpedia_url(self, feature_id: int, layer: int) -> str:
         """Generate Neuronpedia URL for a feature."""
-        return f"https://www.neuronpedia.org/gemma-scope-2-12b-it-res/{layer}-65k/{feature_id}"
+        model_id = self.get_neuronpedia_model_id()
+        source_id = self.get_neuronpedia_source_id(layer)
+        return f"https://www.neuronpedia.org/{model_id}/{source_id}/{feature_id}"
+
+    def get_neuronpedia_embed_url(self, feature_id: int, layer: int) -> str:
+        """Generate embeddable Neuronpedia URL with embed options."""
+        base_url = self.get_neuronpedia_url(feature_id, layer)
+        # Using only documented embed parameters
+        embed_params = [
+            "embed=true",
+            "embedexplanation=true",
+            "embedplots=true",
+            "embedtest=true",
+        ]
+        return f"{base_url}?{'&'.join(embed_params)}"
+
+    def has_neuronpedia_data(self, layer: int) -> bool:
+        """Check if Neuronpedia has data for this layer."""
+        return layer in NEURONPEDIA_LAYERS
+
+    def fetch_neuronpedia_data(self, feature_id: int, layer: int) -> dict:
+        """
+        Fetch feature data from Neuronpedia API.
+
+        Returns explanations, lists, positive/negative logits, and top activations.
+        """
+        # Check if Neuronpedia has data for this layer
+        if not self.has_neuronpedia_data(layer):
+            return {
+                "error": f"Neuronpedia does not have data for layer {layer}",
+                "unsupported_layer": True,
+                "supported_layers": NEURONPEDIA_LAYERS,
+            }
+
+        model_id = self.get_neuronpedia_model_id()
+        source_id = self.get_neuronpedia_source_id(layer)
+        cache_key = f"{model_id}/{source_id}/{feature_id}"
+
+        # Check cache first
+        if cache_key in _neuronpedia_cache:
+            return _neuronpedia_cache[cache_key]
+
+        if not NEURONPEDIA_API_KEY:
+            return {"error": "No Neuronpedia API key configured"}
+
+        try:
+            url = f"{NEURONPEDIA_BASE_URL}/feature/{model_id}/{source_id}/{feature_id}"
+            headers = {"x-api-key": NEURONPEDIA_API_KEY}
+            response = requests.get(url, headers=headers, timeout=10)
+
+            if response.status_code == 404:
+                return {"error": "Feature not found on Neuronpedia"}
+
+            response.raise_for_status()
+            data = response.json()
+
+            # Extract relevant fields
+            result = {
+                "feature_id": feature_id,
+                "layer": layer,
+                "neuronpedia_url": self.get_neuronpedia_url(feature_id, layer),
+                "neuronpedia_embed_url": self.get_neuronpedia_embed_url(feature_id, layer),
+                # Explanations
+                "explanations": [],
+                # Lists/categories
+                "lists": [],
+                # Positive and negative logits (token associations)
+                "positive_logits": [],
+                "negative_logits": [],
+                # Top activations (example texts)
+                "top_activations": [],
+                # Statistics
+                "max_activation": data.get("maxActApprox"),
+                "frac_nonzero": data.get("frac_nonzero"),
+                # Activation histogram
+                "activation_histogram": {
+                    "heights": data.get("freq_hist_data_bar_heights", []),
+                    "values": data.get("freq_hist_data_bar_values", []),
+                },
+            }
+
+            # Extract explanations
+            if "explanations" in data and data["explanations"]:
+                for exp in data["explanations"]:
+                    result["explanations"].append({
+                        "description": exp.get("description", ""),
+                        "score": exp.get("score"),
+                        "model": exp.get("explanationModelName"),
+                    })
+
+            # Extract positive/negative logits
+            if "pos_str" in data and "pos_values" in data:
+                for token, value in zip(data["pos_str"], data["pos_values"]):
+                    result["positive_logits"].append({"token": token, "value": value})
+
+            if "neg_str" in data and "neg_values" in data:
+                for token, value in zip(data["neg_str"], data["neg_values"]):
+                    result["negative_logits"].append({"token": token, "value": value})
+
+            # Extract top activations (example texts where feature fires)
+            if "activations" in data and data["activations"]:
+                for act in data["activations"][:10]:  # Limit to 10 examples
+                    tokens = act.get("tokens", [])
+                    values = act.get("values", [])
+                    max_value = act.get("maxValue", 0)
+                    max_idx = act.get("maxValueTokenIndex", 0)
+
+                    result["top_activations"].append({
+                        "tokens": tokens,
+                        "values": values,
+                        "max_value": max_value,
+                        "max_token_index": max_idx,
+                    })
+
+            # Cache the result
+            _neuronpedia_cache[cache_key] = result
+            return result
+
+        except requests.exceptions.Timeout:
+            return {"error": "Neuronpedia API timeout"}
+        except requests.exceptions.RequestException as e:
+            return {"error": f"Neuronpedia API error: {str(e)}"}
+        except Exception as e:
+            return {"error": f"Failed to parse Neuronpedia data: {str(e)}"}
 
     def compare_prompts(
         self,
@@ -734,8 +1034,21 @@ class SAEModelManager:
                     "neuronpedia_url": self.get_neuronpedia_url(feat_idx, layer_idx),
                 })
 
+            # Get top feature IDs for indexing activations
+            top_feature_ids = [f["feature_id"] for f in differential_features]
+
+            # Store per-token activations for top features (sparse format)
+            # Format: {feature_id: [act_per_token, ...]}
+            token_acts_a = {}
+            token_acts_b = {}
+            for feat_id in top_feature_ids:
+                token_acts_a[feat_id] = [round(v, 4) for v in sae_acts_a[:, feat_id].tolist()]
+                token_acts_b[feat_id] = [round(v, 4) for v in sae_acts_b[:, feat_id].tolist()]
+
             layers_data[layer_idx] = {
                 "differential_features": differential_features,
+                "token_activations_a": token_acts_a,
+                "token_activations_b": token_acts_b,
             }
 
         return {

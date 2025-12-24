@@ -32,38 +32,76 @@ def index():
 @app.route("/api/analyze", methods=["POST"])
 def analyze_prompt():
     """
-    Analyze a prompt and return SAE activation data for all layers.
+    Analyze a prompt - lazy mode returns only tokens, eager mode returns all layers.
 
     Request JSON:
-        {"prompt": "text to analyze", "top_k": 10}
+        {"prompt": "text to analyze", "top_k": 10, "lazy": true}
 
-    Response JSON:
+    With lazy=true (default):
+        Returns tokens and available layers, NO SAE data.
+        Use /api/analyze/layer to fetch individual layer data.
+
+    With lazy=false:
+        Returns full analysis with all layers (loads all SAE weights).
+
+    Response JSON (lazy=true):
         {
             "tokens": ["The", " law", ...],
             "num_tokens": 5,
-            "available_layers": [12, 24, 31, 41],
-            "layers": {
-                "12": {
-                    "sae_acts": [[...], ...],
-                    "top_features_per_token": [[...], ...],
-                    "top_features_global": [{"id": 123, "mean_activation": 5.2}, ...],
-                    "num_features": 65536
-                },
-                ...
-            },
+            "available_layers": [9, 17, 22, 29],
             "sae_config": {"width": "65k", "l0": "medium"}
         }
     """
     data = request.get_json()
     prompt = data.get("prompt", "")
     top_k = data.get("top_k", 10)
+    lazy = data.get("lazy", True)  # Default to lazy loading
 
     if not prompt.strip():
         return jsonify({"error": "Prompt cannot be empty"}), 400
 
     try:
         manager = get_manager()
-        result = manager.analyze_prompt(prompt, top_k=top_k)
+        if lazy:
+            result = manager.analyze_prompt_lazy(prompt)
+        else:
+            result = manager.analyze_prompt(prompt, top_k=top_k)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/analyze/layer", methods=["POST"])
+def analyze_layer():
+    """
+    Analyze a specific layer for a prompt. Loads SAE weights on-demand.
+
+    Request JSON:
+        {"prompt": "text to analyze", "layer": 9, "top_k": 10}
+
+    Response JSON:
+        {
+            "layer": 9,
+            "sae_acts": [[...], ...],
+            "top_features_per_token": [[...], ...],
+            "top_features_global": [{"id": 123, "mean_activation": 5.2}, ...],
+            "num_features": 262144
+        }
+    """
+    data = request.get_json()
+    prompt = data.get("prompt", "")
+    layer = data.get("layer")
+    top_k = data.get("top_k", 10)
+
+    if not prompt.strip():
+        return jsonify({"error": "Prompt cannot be empty"}), 400
+
+    if layer is None:
+        return jsonify({"error": "Layer is required"}), 400
+
+    try:
+        manager = get_manager()
+        result = manager.analyze_layer(prompt, layer, top_k=top_k)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -103,6 +141,35 @@ def get_feature_info(feature_id: int):
         # Get top predicted tokens for this feature
         result["top_tokens"] = manager.get_top_logits_for_feature(feature_id, layer=layer, top_k=10)
 
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/neuronpedia/<int:layer>/<int:feature_id>", methods=["GET"])
+def get_neuronpedia_data(layer: int, feature_id: int):
+    """
+    Fetch feature data from Neuronpedia.
+
+    Returns explanations, lists, positive/negative logits, and top activations
+    for the specified feature.
+
+    Response JSON:
+        {
+            "feature_id": 123,
+            "layer": 12,
+            "neuronpedia_url": "https://...",
+            "explanations": [{"description": "...", "score": 0.8}],
+            "positive_logits": [{"token": "energy", "value": 1.23}],
+            "negative_logits": [{"token": "the", "value": -0.5}],
+            "top_activations": [{"tokens": [...], "values": [...], "max_value": 5.2}],
+            "max_activation": 15.5,
+            "frac_nonzero": 0.003
+        }
+    """
+    try:
+        manager = get_manager()
+        result = manager.fetch_neuronpedia_data(feature_id, layer)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -157,6 +224,7 @@ def steer_generation():
 @app.route("/api/config", methods=["GET"])
 def get_config():
     """Get current SAE configuration."""
+    from sae_model import NEURONPEDIA_LAYERS
     manager = get_manager()
     return jsonify({
         "model_path": manager.model_path,
@@ -164,6 +232,7 @@ def get_config():
         "sae_width": manager.sae_width,
         "sae_l0": manager.sae_l0,
         "device": manager.device,
+        "neuronpedia_layers": NEURONPEDIA_LAYERS,
     })
 
 
