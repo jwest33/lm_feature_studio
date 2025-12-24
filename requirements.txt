@@ -1,0 +1,14 @@
+# SAE Feature Explorer Dependencies
+
+# Web framework
+flask>=3.0.0
+
+# Deep learning
+torch>=2.0.0
+transformers>=4.40.0
+safetensors>=0.4.0
+
+# Utilities
+huggingface_hub>=0.20.0
+einops>=0.7.0
+numpy>=1.24.0
