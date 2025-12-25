@@ -11,6 +11,10 @@ let availableLayers = [];  // All available layers
 let neuronpediaLayers = []; // Layers that have Neuronpedia data
 let layerDataCache = {};   // Cache for lazy-loaded layer data
 
+// Steering Queue State
+let steeringQueue = [];   // [{feature_id, layer, coefficient, source_tab}, ...]
+let sidebarOpen = false;
+
 // DOM Elements
 const promptInput = document.getElementById('prompt-input');
 const analyzeForm = document.getElementById('analyze-form');
@@ -171,15 +175,21 @@ async function fetchNeuronpediaData(featureId, layer) {
     return response.json();
 }
 
-async function generateWithSteeringMulti(prompt, steeringFeatures, maxTokens) {
+async function generateWithSteeringMulti(prompt, steeringFeatures, maxTokens, normalization = null) {
+    const body = {
+        prompt,
+        steering: steeringFeatures,
+        max_tokens: maxTokens
+    };
+
+    if (normalization) {
+        body.normalization = normalization;
+    }
+
     const response = await fetch('/api/steer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            prompt,
-            steering: steeringFeatures,
-            max_tokens: maxTokens
-        })
+        body: JSON.stringify(body)
     });
 
     if (!response.ok) {
@@ -384,10 +394,11 @@ function renderFeatureList(features) {
     let html = '';
     features.forEach(feat => {
         const selected = feat.id === selectedFeatureId ? 'selected' : '';
-        html += `<div class="feature-item ${selected}" data-feature-id="${feat.id}">
+        html += `<div class="feature-item ${selected}" data-feature-id="${feat.id}" data-layer="${selectedLayer}">
             <span class="feature-id">#${feat.id}</span>
             <span class="feature-activation">${formatNumber(feat.mean_activation)}</span>
             <span class="feature-token">max @ "${escapeHtml(feat.max_token)}"</span>
+            <button class="add-to-steering-btn" title="Add to Steering Queue">+</button>
         </div>`;
     });
 
@@ -395,9 +406,20 @@ function renderFeatureList(features) {
 
     // Add click handlers
     featureList.querySelectorAll('.feature-item').forEach(el => {
-        el.addEventListener('click', () => {
+        el.addEventListener('click', (e) => {
+            // Don't trigger if clicking the add button
+            if (e.target.classList.contains('add-to-steering-btn')) return;
             const featureId = parseInt(el.dataset.featureId);
             selectFeature(featureId);
+        });
+
+        // Add to steering queue button
+        const addBtn = el.querySelector('.add-to-steering-btn');
+        addBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const featureId = parseInt(el.dataset.featureId);
+            const layer = parseInt(el.dataset.layer);
+            addToSteeringQueue(featureId, layer, 'analyze');
         });
     });
 }
@@ -821,6 +843,7 @@ let comparisonResult = null;
 let refusalResult = null;
 let rankingResult = null;
 let pairIndex = 1;
+let uploadedPairsData = null;  // Store uploaded JSON data
 
 // Preset prompt pairs for batch analysis
 const PRESET_PAIRS = [
@@ -992,6 +1015,7 @@ function renderComparisonResults(result, layer) {
                 </div>
                 <span class="diff-value">${isPositive ? '+' : ''}${feat.mean_diff.toFixed(3)}</span>
                 <span class="ratio-value">x${feat.ratio.toFixed(2)}</span>
+                <button class="add-to-steering-btn" title="Add to Steering Queue">+</button>
             </div>
         `;
     });
@@ -1000,7 +1024,10 @@ function renderComparisonResults(result, layer) {
 
     // Add click handlers for feature items
     container.querySelectorAll('.diff-feature-item.clickable').forEach(el => {
-        el.addEventListener('click', () => {
+        el.addEventListener('click', (e) => {
+            // Don't trigger if clicking the add button
+            if (e.target.classList.contains('add-to-steering-btn')) return;
+
             // Remove selected class from all items
             container.querySelectorAll('.diff-feature-item').forEach(item => item.classList.remove('selected'));
             // Add selected class to clicked item
@@ -1015,6 +1042,15 @@ function renderComparisonResults(result, layer) {
 
             // Render Neuronpedia detail
             renderModeFeatureDetail('diff-feature-detail', featureId, featLayer, npUrl);
+        });
+
+        // Add to steering queue button
+        const addBtn = el.querySelector('.add-to-steering-btn');
+        addBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const featureId = parseInt(el.dataset.featureId);
+            const layer = parseInt(el.dataset.layer);
+            addToSteeringQueue(featureId, layer, 'compare');
         });
     });
 
@@ -1059,6 +1095,7 @@ function renderRefusalResults(result, layer) {
                 <span class="feature-id">#${feat.feature_id}</span>
                 <span class="correlation-score">corr: ${feat.correlation_score.toFixed(4)}</span>
                 <span class="diff-value">mean: ${feat.mean_activation.toFixed(4)}</span>
+                <button class="add-to-steering-btn" title="Add to Steering Queue">+</button>
             </div>
         `;
     });
@@ -1067,7 +1104,10 @@ function renderRefusalResults(result, layer) {
 
     // Add click handlers for feature items
     featuresContainer.querySelectorAll('.refusal-feature-item.clickable').forEach(el => {
-        el.addEventListener('click', () => {
+        el.addEventListener('click', (e) => {
+            // Don't trigger if clicking the add button
+            if (e.target.classList.contains('add-to-steering-btn')) return;
+
             // Remove selected class from all items
             featuresContainer.querySelectorAll('.refusal-feature-item').forEach(item => item.classList.remove('selected'));
             // Add selected class to clicked item
@@ -1077,6 +1117,15 @@ function renderRefusalResults(result, layer) {
             const featLayer = parseInt(el.dataset.layer);
             const npUrl = el.dataset.npUrl;
             renderModeFeatureDetail('refusal-feature-detail', featureId, featLayer, npUrl);
+        });
+
+        // Add to steering queue button
+        const addBtn = el.querySelector('.add-to-steering-btn');
+        addBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const featureId = parseInt(el.dataset.featureId);
+            const layer = parseInt(el.dataset.layer);
+            addToSteeringQueue(featureId, layer, 'refusal');
         });
     });
 }
@@ -1101,6 +1150,7 @@ function renderRankingResults(result, layer) {
                     <th>Harmful</th>
                     <th>Benign</th>
                     <th>Score</th>
+                    <th></th>
                 </tr>
             </thead>
             <tbody>
@@ -1118,6 +1168,7 @@ function renderRankingResults(result, layer) {
                 <td>${feat.mean_harmful_activation.toFixed(3)}</td>
                 <td>${feat.mean_benign_activation.toFixed(3)}</td>
                 <td>${feat.differential_score.toFixed(4)}</td>
+                <td><button class="add-to-steering-btn" title="Add to Steering Queue">+</button></td>
             </tr>
         `;
     });
@@ -1127,7 +1178,10 @@ function renderRankingResults(result, layer) {
 
     // Add click handlers for ranking rows
     container.querySelectorAll('.ranking-row.clickable').forEach(el => {
-        el.addEventListener('click', () => {
+        el.addEventListener('click', (e) => {
+            // Don't trigger if clicking the add button
+            if (e.target.classList.contains('add-to-steering-btn')) return;
+
             // Remove selected class from all rows
             container.querySelectorAll('.ranking-row').forEach(row => row.classList.remove('selected'));
             // Add selected class to clicked row
@@ -1137,6 +1191,15 @@ function renderRankingResults(result, layer) {
             const featLayer = parseInt(el.dataset.layer);
             const npUrl = el.dataset.npUrl;
             renderModeFeatureDetail('ranking-feature-detail', featureId, featLayer, npUrl);
+        });
+
+        // Add to steering queue button
+        const addBtn = el.querySelector('.add-to-steering-btn');
+        addBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const featureId = parseInt(el.dataset.featureId);
+            const layer = parseInt(el.dataset.layer);
+            addToSteeringQueue(featureId, layer, 'batch');
         });
     });
 }
@@ -1338,6 +1401,103 @@ document.getElementById('add-pair-btn').addEventListener('click', () => addPromp
 // Load preset button
 document.getElementById('load-preset-btn').addEventListener('click', loadPresetPairs);
 
+// Clear all pairs button
+document.getElementById('clear-pairs-btn').addEventListener('click', clearAllPairs);
+
+// File upload handling
+const pairsFileInput = document.getElementById('pairs-file-input');
+const loadFileBtn = document.getElementById('load-file-btn');
+const uploadFilename = document.getElementById('upload-filename');
+const pairsCountInput = document.getElementById('pairs-count-input');
+
+pairsFileInput.addEventListener('change', handleFileSelect);
+loadFileBtn.addEventListener('click', loadPairsFromFile);
+
+function handleFileSelect(e) {
+    const file = e.target.files[0];
+    if (!file) {
+        uploadFilename.textContent = 'No file selected';
+        loadFileBtn.disabled = true;
+        uploadedPairsData = null;
+        return;
+    }
+
+    uploadFilename.textContent = file.name;
+
+    const reader = new FileReader();
+    reader.onload = function(event) {
+        try {
+            const data = JSON.parse(event.target.result);
+
+            // Support both {pairs: [...]} and direct array format
+            if (data.pairs && Array.isArray(data.pairs)) {
+                uploadedPairsData = data.pairs;
+            } else if (Array.isArray(data)) {
+                uploadedPairsData = data;
+            } else {
+                throw new Error('Invalid format: expected {pairs: [...]} or array');
+            }
+
+            // Update max value based on available pairs
+            const totalPairs = uploadedPairsData.length;
+            pairsCountInput.max = totalPairs;
+
+            // Set a reasonable default (min of 10 or total pairs)
+            pairsCountInput.value = Math.min(10, totalPairs);
+
+            loadFileBtn.disabled = false;
+            setStatus(`Loaded ${totalPairs} pairs from file. Select count and click "Load Pairs".`);
+        } catch (error) {
+            uploadFilename.textContent = 'Invalid JSON file';
+            loadFileBtn.disabled = true;
+            uploadedPairsData = null;
+            setStatus(`Error parsing JSON: ${error.message}`);
+        }
+    };
+
+    reader.onerror = function() {
+        uploadFilename.textContent = 'Error reading file';
+        loadFileBtn.disabled = true;
+        uploadedPairsData = null;
+        setStatus('Error reading file');
+    };
+
+    reader.readAsText(file);
+}
+
+function loadPairsFromFile() {
+    if (!uploadedPairsData || uploadedPairsData.length === 0) {
+        setStatus('No pairs data available');
+        return;
+    }
+
+    const count = parseInt(pairsCountInput.value) || 10;
+    const pairsToLoad = uploadedPairsData.slice(0, count);
+
+    // Clear existing pairs
+    const container = document.getElementById('prompt-pairs-container');
+    container.innerHTML = '';
+    pairIndex = 0;
+
+    // Add pairs from file
+    pairsToLoad.forEach(pair => {
+        // Support both "harmless" and "benign" keys
+        const harmful = pair.harmful || '';
+        const benign = pair.harmless || pair.benign || '';
+        addPromptPair(harmful, benign);
+    });
+
+    setStatus(`Loaded ${pairsToLoad.length} prompt pairs`);
+}
+
+function clearAllPairs() {
+    const container = document.getElementById('prompt-pairs-container');
+    container.innerHTML = '';
+    pairIndex = 0;
+    addPromptPair(); // Add one empty row
+    setStatus('Cleared all pairs');
+}
+
 // Export buttons
 document.getElementById('export-compare-json').addEventListener('click', () => {
     if (comparisonResult) exportData('/api/export/comparison', comparisonResult, 'json');
@@ -1361,11 +1521,288 @@ document.querySelector('.btn-remove-pair')?.addEventListener('click', function()
 });
 
 // =============================================================================
+// Steering Queue (Sidebar)
+// =============================================================================
+
+function addToSteeringQueue(featureId, layer, sourceTab = 'unknown') {
+    // Check if already in queue
+    const exists = steeringQueue.some(q => q.feature_id === featureId && q.layer === layer);
+    if (exists) {
+        setStatus(`Feature #${featureId} (L${layer}) already in queue`);
+        return;
+    }
+
+    steeringQueue.push({
+        feature_id: featureId,
+        layer: layer,
+        coefficient: 0.25,
+        source_tab: sourceTab
+    });
+
+    renderSteeringQueue();
+    setStatus(`Added #${featureId} (L${layer}) to steering queue`);
+
+    // Open sidebar if first item added
+    if (steeringQueue.length === 1 && !sidebarOpen) {
+        toggleSteeringSidebar(true);
+    }
+}
+
+function removeFromSteeringQueue(index) {
+    if (index >= 0 && index < steeringQueue.length) {
+        const item = steeringQueue[index];
+        steeringQueue.splice(index, 1);
+        renderSteeringQueue();
+        setStatus(`Removed #${item.feature_id} from steering queue`);
+    }
+}
+
+function updateQueueCoefficient(index, coefficient) {
+    if (index >= 0 && index < steeringQueue.length) {
+        steeringQueue[index].coefficient = coefficient;
+    }
+}
+
+function clearSteeringQueue() {
+    steeringQueue = [];
+    renderSteeringQueue();
+    setStatus('Steering queue cleared');
+}
+
+function renderSteeringQueue() {
+    const container = document.getElementById('steering-queue-list');
+    const countEl = document.querySelector('.queue-count');
+
+    if (!container) return;
+
+    // Update count
+    if (countEl) {
+        countEl.textContent = `${steeringQueue.length} feature${steeringQueue.length !== 1 ? 's' : ''}`;
+    }
+
+    if (steeringQueue.length === 0) {
+        container.innerHTML = '<span class="placeholder">Add features from any tab using the + button</span>';
+        return;
+    }
+
+    let html = '';
+    steeringQueue.forEach((item, idx) => {
+        html += `
+            <div class="queue-item" data-index="${idx}">
+                <span class="queue-feature">L${item.layer} #${item.feature_id}</span>
+                <input type="range" class="queue-coeff-slider" min="-1" max="1" step="0.05" value="${item.coefficient}" />
+                <input type="number" class="queue-coeff-input" step="any" value="${item.coefficient}" />
+                <button class="queue-remove-btn" title="Remove">×</button>
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+
+    // Add event listeners
+    container.querySelectorAll('.queue-item').forEach(itemEl => {
+        const idx = parseInt(itemEl.dataset.index);
+
+        const slider = itemEl.querySelector('.queue-coeff-slider');
+        const input = itemEl.querySelector('.queue-coeff-input');
+
+        // Slider updates input
+        slider.addEventListener('input', () => {
+            const val = parseFloat(slider.value);
+            input.value = val;
+            updateQueueCoefficient(idx, val);
+        });
+
+        // Input updates slider (clamped for slider, but actual value stored)
+        input.addEventListener('input', () => {
+            const val = parseFloat(input.value) || 0;
+            slider.value = Math.max(-1, Math.min(1, val)); // Clamp slider display
+            updateQueueCoefficient(idx, val);
+        });
+
+        // Remove button
+        const removeBtn = itemEl.querySelector('.queue-remove-btn');
+        removeBtn.addEventListener('click', () => removeFromSteeringQueue(idx));
+    });
+}
+
+function toggleSteeringSidebar(forceOpen = null) {
+    const sidebar = document.getElementById('steering-sidebar');
+    if (!sidebar) return;
+
+    if (forceOpen !== null) {
+        sidebarOpen = forceOpen;
+    } else {
+        sidebarOpen = !sidebarOpen;
+    }
+
+    sidebar.classList.toggle('open', sidebarOpen);
+}
+
+async function runSidebarSteering() {
+    if (steeringQueue.length === 0) {
+        setStatus('Add features to the queue first');
+        return;
+    }
+
+    const prompt = document.getElementById('sidebar-prompt').value.trim();
+    const maxTokens = parseInt(document.getElementById('sidebar-tokens').value);
+    const normalization = document.getElementById('sidebar-normalization').value || null;
+
+    if (!prompt) {
+        setStatus('Please enter a prompt');
+        return;
+    }
+
+    const steerBtn = document.getElementById('sidebar-steer-btn');
+    const output = document.getElementById('sidebar-output');
+
+    setLoading(steerBtn, true);
+    setStatus(`Generating with ${steeringQueue.length} steering vector(s)...`);
+
+    try {
+        // Convert queue to steering format
+        const steeringFeatures = steeringQueue.map(item => ({
+            feature_id: item.feature_id,
+            layer: item.layer,
+            coefficient: item.coefficient
+        }));
+
+        const result = await generateWithSteeringMulti(prompt, steeringFeatures, maxTokens, normalization);
+
+        // Format steering info
+        let steeringInfo = steeringFeatures
+            .map(s => `L${s.layer}:#${s.feature_id}: ${s.coefficient > 0 ? '+' : ''}${s.coefficient}`)
+            .join(', ');
+
+        const normLabel = result.normalization ? ` (${result.normalization})` : '';
+
+        output.innerHTML = `
+            <div class="output-section original">
+                <h4>Original Output</h4>
+                <div class="output-text">${escapeHtml(result.original_output)}</div>
+            </div>
+            <div class="output-section steered">
+                <h4>Steered Output${normLabel}</h4>
+                <p class="hint">Vectors: ${steeringInfo}</p>
+                <div class="output-text">${escapeHtml(result.steered_output)}</div>
+            </div>
+        `;
+        setStatus('Steering generation complete');
+    } catch (error) {
+        setStatus(`Error: ${error.message}`);
+        output.innerHTML = `<span class="placeholder" style="color: var(--accent-red)">Error: ${escapeHtml(error.message)}</span>`;
+    } finally {
+        setLoading(steerBtn, false);
+    }
+}
+
+function initSteeringSidebar() {
+    // Toggle button
+    const toggleBtn = document.getElementById('sidebar-toggle');
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', () => toggleSteeringSidebar());
+    }
+
+    // Close button
+    const closeBtn = document.getElementById('sidebar-close');
+    if (closeBtn) {
+        closeBtn.addEventListener('click', () => toggleSteeringSidebar(false));
+    }
+
+    // Clear queue button
+    const clearBtn = document.getElementById('clear-queue-btn');
+    if (clearBtn) {
+        clearBtn.addEventListener('click', clearSteeringQueue);
+    }
+
+    // Steer button
+    const steerBtn = document.getElementById('sidebar-steer-btn');
+    if (steerBtn) {
+        steerBtn.addEventListener('click', runSidebarSteering);
+    }
+
+    // Initialize resize functionality
+    initSidebarResize();
+
+    // Initial render
+    renderSteeringQueue();
+}
+
+// Sidebar resize functionality
+function initSidebarResize() {
+    const sidebar = document.getElementById('steering-sidebar');
+    const resizeHandle = document.getElementById('sidebar-resize-handle');
+
+    if (!sidebar || !resizeHandle) return;
+
+    let isResizing = false;
+    let startX = 0;
+    let startWidth = 0;
+
+    function startResize(clientX) {
+        isResizing = true;
+        startX = clientX;
+        startWidth = sidebar.offsetWidth;
+        resizeHandle.classList.add('resizing');
+        document.body.classList.add('sidebar-resizing');
+        sidebar.style.transition = 'none';
+    }
+
+    function doResize(clientX) {
+        if (!isResizing) return;
+
+        // Dragging left increases width, dragging right decreases
+        const deltaX = startX - clientX;
+        let newWidth = startWidth + deltaX;
+
+        // Clamp between min and max (can overlap up to 90% of viewport)
+        const minWidth = 280;
+        const maxWidth = window.innerWidth * 0.9;
+        newWidth = Math.max(minWidth, Math.min(maxWidth, newWidth));
+
+        sidebar.style.width = `${newWidth}px`;
+    }
+
+    function stopResize() {
+        if (!isResizing) return;
+        isResizing = false;
+        resizeHandle.classList.remove('resizing');
+        document.body.classList.remove('sidebar-resizing');
+        sidebar.style.transition = '';
+    }
+
+    // Mouse events
+    resizeHandle.addEventListener('mousedown', (e) => {
+        startResize(e.clientX);
+        e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', (e) => doResize(e.clientX));
+    document.addEventListener('mouseup', stopResize);
+
+    // Touch events
+    resizeHandle.addEventListener('touchstart', (e) => {
+        startResize(e.touches[0].clientX);
+        e.preventDefault();
+    });
+
+    document.addEventListener('touchmove', (e) => {
+        if (isResizing && e.touches[0]) {
+            doResize(e.touches[0].clientX);
+        }
+    });
+
+    document.addEventListener('touchend', stopResize);
+}
+
+// =============================================================================
 // Initialization
 // =============================================================================
 
 document.addEventListener('DOMContentLoaded', () => {
     fetchConfig();
     initSteeringSliders();
+    initSteeringSidebar();
     setStatus('Ready - enter a prompt and click Analyze');
 });

@@ -601,6 +601,8 @@ class SAEModelManager:
         max_new_tokens: int = 80,
         steering_layer_offset: int = -5,
         sae_layer: int = None,
+        normalization: str = None,
+        norm_clamp_factor: float = 1.5,
     ) -> dict:
         """
         Generate text with feature steering applied.
@@ -611,6 +613,12 @@ class SAEModelManager:
             max_new_tokens: Maximum tokens to generate
             steering_layer_offset: Layer offset from SAE layer for steering
             sae_layer: Default SAE layer for features without explicit layer
+            normalization: Normalization mode to prevent model degradation:
+                - None: No normalization (current behavior)
+                - "preserve_norm": Rescale output to maintain original norm after steering
+                - "clamp": Clamp norm change to norm_clamp_factor
+                - "unit_steer": Normalize decoder vector to unit norm before applying
+            norm_clamp_factor: For "clamp" mode, max allowed norm change ratio (default 1.5)
 
         Returns:
             Dictionary with original and steered outputs
@@ -666,27 +674,70 @@ class SAEModelManager:
             sae = self.get_sae(layer)
             steering_target_layer = layer + steering_layer_offset
 
-            def make_steering_hook(sae_ref, feats):
+            def make_steering_hook(sae_ref, feats, norm_mode, clamp_factor):
                 def steering_hook(mod, inputs, outputs):
                     output = outputs[0]
-                    for sf in feats:
-                        feat_idx = sf["feature_id"]
-                        coeff = sf["coefficient"]
-                        decoder_vec = sae_ref.w_dec[feat_idx]
 
-                        # Handle KV caching - different logic for first vs cached passes
-                        if output.shape[1] == 1:
-                            avg_norm = torch.norm(output, dim=-1)
-                            output += coeff * avg_norm * decoder_vec
-                        else:
-                            avg_norm = torch.norm(output[0, 1:], dim=-1, keepdim=True)
-                            output[0, 1:] += coeff * avg_norm * decoder_vec
+                    # Handle KV caching - different logic for first vs cached passes
+                    if output.shape[1] == 1:
+                        # Single token (cached generation)
+                        original_norm = torch.norm(output, dim=-1, keepdim=True)
+
+                        for sf in feats:
+                            feat_idx = sf["feature_id"]
+                            coeff = sf["coefficient"]
+                            decoder_vec = sae_ref.w_dec[feat_idx]
+
+                            if norm_mode == "unit_steer":
+                                # Normalize decoder vector to unit norm
+                                decoder_vec = decoder_vec / (torch.norm(decoder_vec) + 1e-8)
+                                output += coeff * original_norm * decoder_vec
+                            else:
+                                output += coeff * original_norm * decoder_vec
+
+                        # Apply post-steering normalization
+                        if norm_mode == "preserve_norm":
+                            new_norm = torch.norm(output, dim=-1, keepdim=True)
+                            output *= original_norm / (new_norm + 1e-8)
+                        elif norm_mode == "clamp":
+                            new_norm = torch.norm(output, dim=-1, keepdim=True)
+                            norm_ratio = new_norm / (original_norm + 1e-8)
+                            if norm_ratio > clamp_factor:
+                                output *= clamp_factor / norm_ratio
+                            elif norm_ratio < 1.0 / clamp_factor:
+                                output *= (1.0 / clamp_factor) / norm_ratio
+                    else:
+                        # Full sequence (first pass)
+                        original_norms = torch.norm(output[0, 1:], dim=-1, keepdim=True)
+
+                        for sf in feats:
+                            feat_idx = sf["feature_id"]
+                            coeff = sf["coefficient"]
+                            decoder_vec = sae_ref.w_dec[feat_idx]
+
+                            if norm_mode == "unit_steer":
+                                decoder_vec = decoder_vec / (torch.norm(decoder_vec) + 1e-8)
+                                output[0, 1:] += coeff * original_norms * decoder_vec
+                            else:
+                                output[0, 1:] += coeff * original_norms * decoder_vec
+
+                        # Apply post-steering normalization
+                        if norm_mode == "preserve_norm":
+                            new_norms = torch.norm(output[0, 1:], dim=-1, keepdim=True)
+                            output[0, 1:] *= original_norms / (new_norms + 1e-8)
+                        elif norm_mode == "clamp":
+                            new_norms = torch.norm(output[0, 1:], dim=-1, keepdim=True)
+                            norm_ratios = new_norms / (original_norms + 1e-8)
+                            scale = torch.ones_like(norm_ratios)
+                            scale = torch.where(norm_ratios > clamp_factor, clamp_factor / norm_ratios, scale)
+                            scale = torch.where(norm_ratios < 1.0 / clamp_factor, (1.0 / clamp_factor) / norm_ratios, scale)
+                            output[0, 1:] *= scale
 
                     return outputs
                 return steering_hook
 
             handle = self.layers[steering_target_layer].register_forward_hook(
-                make_steering_hook(sae, layer_features)
+                make_steering_hook(sae, layer_features, normalization, norm_clamp_factor)
             )
             handles.append(handle)
 
@@ -712,6 +763,7 @@ class SAEModelManager:
             "steered_output": steered_output,
             "steering_applied": steering_features,
             "steering_layers": list(features_by_layer.keys()),
+            "normalization": normalization,
         }
 
     def _find_lm_head(self):

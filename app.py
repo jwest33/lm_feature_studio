@@ -184,7 +184,9 @@ def steer_generation():
         {
             "prompt": "Tell me a fun fact",
             "steering": [{"feature_id": 123, "coefficient": 0.25, "layer": 12}],
-            "max_tokens": 80
+            "max_tokens": 80,
+            "normalization": "preserve_norm",  // Optional: "preserve_norm", "clamp", "unit_steer", or null
+            "norm_clamp_factor": 1.5           // Optional: for "clamp" mode
         }
 
     Response JSON:
@@ -193,16 +195,24 @@ def steer_generation():
             "original_output": "...",
             "steered_output": "...",
             "steering_applied": [...],
-            "steering_layers": [12, 24]
+            "steering_layers": [12, 24],
+            "normalization": "preserve_norm"
         }
     """
     data = request.get_json()
     prompt = data.get("prompt", "")
     steering = data.get("steering", [])
     max_tokens = data.get("max_tokens", 80)
+    normalization = data.get("normalization", None)
+    norm_clamp_factor = data.get("norm_clamp_factor", 1.5)
 
     if not prompt.strip():
         return jsonify({"error": "Prompt cannot be empty"}), 400
+
+    # Validate normalization mode
+    valid_modes = [None, "preserve_norm", "clamp", "unit_steer"]
+    if normalization not in valid_modes:
+        return jsonify({"error": f"Invalid normalization mode. Use one of: {valid_modes}"}), 400
 
     # Validate steering config
     for sf in steering:
@@ -215,6 +225,8 @@ def steer_generation():
             prompt=prompt,
             steering_features=steering,
             max_new_tokens=max_tokens,
+            normalization=normalization,
+            norm_clamp_factor=norm_clamp_factor,
         )
         return jsonify(result)
     except Exception as e:

@@ -235,6 +235,24 @@
                 <div class="section">
                     <h2>Batch Feature Ranking</h2>
                     <p class="hint">Analyze multiple prompt pairs to find features consistently correlated with harmful content</p>
+
+                    <!-- File Upload Section -->
+                    <div class="upload-section">
+                        <div class="upload-row">
+                            <div class="upload-file-group">
+                                <label for="pairs-file-input">Upload JSON</label>
+                                <input type="file" id="pairs-file-input" accept=".json" />
+                                <span id="upload-filename" class="upload-filename">No file selected</span>
+                            </div>
+                            <div class="upload-count-group">
+                                <label for="pairs-count-input">Pairs to load</label>
+                                <input type="number" id="pairs-count-input" min="1" max="5000" value="10" />
+                            </div>
+                            <button type="button" id="load-file-btn" class="btn-small" disabled>Load Pairs</button>
+                        </div>
+                        <p class="hint upload-hint">Supports JSON with format: {"pairs": [{"harmful": "...", "harmless": "..."}]}</p>
+                    </div>
+
                     <div id="prompt-pairs-container">
                         <div class="prompt-pair-row" data-index="0">
                             <input type="text" class="pair-harmful" placeholder="Harmful prompt" />
@@ -245,6 +263,7 @@
                     <div class="batch-buttons">
                         <button type="button" id="add-pair-btn" class="btn-small">+ Add Pair</button>
                         <button type="button" id="load-preset-btn" class="btn-small">Load Preset</button>
+                        <button type="button" id="clear-pairs-btn" class="btn-small btn-danger">Clear All</button>
                     </div>
                     <button type="button" id="rank-btn">
                         <span class="btn-text">Rank Features</span>
@@ -278,6 +297,61 @@
             <span id="config-info">Loading config...</span>
         </footer>
     </div>
+
+    <!-- Floating Steering Sidebar -->
+    <aside class="steering-sidebar" id="steering-sidebar">
+        <div class="sidebar-resize-handle" id="sidebar-resize-handle" title="Drag to resize"></div>
+        <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle Steering Panel">
+            <span class="toggle-icon">&#9881;</span>
+            <span class="toggle-label">Steer</span>
+        </button>
+        <div class="sidebar-content">
+            <div class="sidebar-header">
+                <h3>Steering Queue</h3>
+                <button class="sidebar-close" id="sidebar-close" title="Close">×</button>
+            </div>
+
+            <div class="queue-section">
+                <div class="queue-header">
+                    <span class="queue-count">0 features</span>
+                    <button class="btn-small btn-clear-queue" id="clear-queue-btn" title="Clear all">Clear</button>
+                </div>
+                <div class="steering-queue-list" id="steering-queue-list">
+                    <span class="placeholder">Add features from any tab using the + button</span>
+                </div>
+            </div>
+
+            <div class="sidebar-controls">
+                <div class="control-group">
+                    <label for="sidebar-prompt">Prompt</label>
+                    <textarea id="sidebar-prompt" rows="3" placeholder="Enter prompt for steering...">Tell me a fun fact.</textarea>
+                </div>
+                <div class="control-row">
+                    <div class="control-group">
+                        <label for="sidebar-tokens">Max tokens</label>
+                        <input type="number" id="sidebar-tokens" min="10" max="200" value="80" />
+                    </div>
+                    <div class="control-group">
+                        <label for="sidebar-normalization">Normalization</label>
+                        <select id="sidebar-normalization">
+                            <option value="">None</option>
+                            <option value="preserve_norm" selected>Preserve Norm</option>
+                            <option value="clamp">Clamp (1.5x)</option>
+                            <option value="unit_steer">Unit Steering</option>
+                        </select>
+                    </div>
+                </div>
+                <button type="button" id="sidebar-steer-btn" class="btn-steer">
+                    <span class="btn-text">Generate with Steering</span>
+                    <span class="btn-loading hidden">Generating...</span>
+                </button>
+            </div>
+
+            <div class="sidebar-output" id="sidebar-output">
+                <span class="placeholder">Configure steering and click generate</span>
+            </div>
+        </div>
+    </aside>
 
     <script src="/static/app.js"></script>
 </body>
