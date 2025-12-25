@@ -2,6 +2,26 @@
  * SAE Feature Explorer - Frontend Logic
  */
 
+// =============================================================================
+// Utility: Auto-size input to fit content
+// =============================================================================
+function autoSizeInput(input, minWidth = 45) {
+    // Create a hidden span to measure text width
+    const span = document.createElement('span');
+    span.style.visibility = 'hidden';
+    span.style.position = 'absolute';
+    span.style.whiteSpace = 'pre';
+    span.style.font = window.getComputedStyle(input).font;
+    span.textContent = input.value || input.placeholder || '';
+    document.body.appendChild(span);
+
+    // Add padding for the input borders and some breathing room
+    const width = Math.max(minWidth, span.offsetWidth + 20);
+    input.style.width = width + 'px';
+
+    document.body.removeChild(span);
+}
+
 // State
 let currentPrompt = '';
 let currentAnalysis = null;
@@ -32,6 +52,28 @@ const addFeatureBtn = document.getElementById('add-feature-btn');
 const steerOutput = document.getElementById('steer-output');
 const statusText = document.getElementById('status-text');
 const configInfo = document.getElementById('config-info');
+
+// Settings Modal Elements
+const settingsBtn = document.getElementById('settings-btn');
+const settingsModal = document.getElementById('settings-modal');
+const settingsClose = document.getElementById('settings-close');
+const settingsCancel = document.getElementById('settings-cancel');
+const settingsApply = document.getElementById('settings-apply');
+const configModelPath = document.getElementById('config-model-path');
+const configSaeRepo = document.getElementById('config-sae-repo');
+const configSaeWidth = document.getElementById('config-sae-width');
+const configSaeL0 = document.getElementById('config-sae-l0');
+const configLayersInfo = document.getElementById('config-layers-info');
+
+// Bake In Modal Elements
+const bakeInBtn = document.getElementById('bake-in-btn');
+const bakeInModal = document.getElementById('bake-in-modal');
+const bakeInClose = document.getElementById('bake-in-close');
+const bakeInCancel = document.getElementById('bake-in-cancel');
+const bakeInApply = document.getElementById('bake-in-apply');
+const bakeInPath = document.getElementById('bake-in-path');
+const bakeInScale = document.getElementById('bake-in-scale');
+const bakeInFeaturesInfo = document.getElementById('bake-in-features-info');
 
 let steerFeatureIndex = 1; // For generating unique row IDs
 
@@ -72,10 +114,14 @@ function formatNumber(num, decimals = 2) {
 // API Calls
 // =============================================================================
 
+// Current config state
+let currentConfig = null;
+
 async function fetchConfig() {
     try {
         const response = await fetch('/api/config');
         const config = await response.json();
+        currentConfig = config;
         availableLayers = config.sae_layers || [];
         neuronpediaLayers = config.neuronpedia_layers || [];
         if (availableLayers.length > 0 && selectedLayer === null) {
@@ -83,9 +129,36 @@ async function fetchConfig() {
         }
         const npLayersInfo = neuronpediaLayers.length > 0 ? ` | NP: ${neuronpediaLayers.join(', ')}` : '';
         configInfo.textContent = `Layers ${availableLayers.join(', ')} | ${config.sae_width} SAE | ${config.device.toUpperCase()}${npLayersInfo}`;
+
+        // Update settings modal fields
+        if (configModelPath) configModelPath.value = config.model_path || '';
+        if (configSaeRepo) configSaeRepo.value = config.sae_repo || '';
+        if (configSaeWidth) configSaeWidth.value = config.sae_width || '262k';
+        if (configSaeL0) configSaeL0.value = config.sae_l0 || 'small';
+        if (configLayersInfo) configLayersInfo.textContent = `Available layers: ${availableLayers.join(', ')}`;
     } catch (error) {
         configInfo.textContent = 'Config unavailable';
     }
+}
+
+async function updateConfig(modelPath, saeRepo, saeWidth, saeL0) {
+    const response = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            model_path: modelPath || undefined,
+            sae_repo: saeRepo || undefined,
+            sae_width: saeWidth || undefined,
+            sae_l0: saeL0 || undefined,
+        })
+    });
+
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to update configuration');
+    }
+
+    return await response.json();
 }
 
 // Check if a layer has Neuronpedia data
@@ -175,11 +248,13 @@ async function fetchNeuronpediaData(featureId, layer) {
     return response.json();
 }
 
-async function generateWithSteeringMulti(prompt, steeringFeatures, maxTokens, normalization = null) {
+async function generateWithSteeringMulti(prompt, steeringFeatures, maxTokens, normalization = null, unitNormalize = false, skipBaseline = false) {
     const body = {
         prompt,
         steering: steeringFeatures,
-        max_tokens: maxTokens
+        max_tokens: maxTokens,
+        unit_normalize: unitNormalize,
+        skip_baseline: skipBaseline
     };
 
     if (normalization) {
@@ -674,16 +749,33 @@ function addSteeringFeature(featureId = 0, coefficient = 0.25) {
 
     row.innerHTML = `
         <input type="number" class="steer-feature-id" min="0" value="${featureId}" placeholder="Feature ID" />
-        <input type="range" class="steer-feature-coeff" min="-1" max="1" step="0.05" value="${coefficient}" />
-        <span class="steer-coeff-display">${coefficient.toFixed(2)}</span>
+        <input type="range" class="steer-feature-coeff" min="-1" max="1" step="0.01" value="${coefficient}" />
+        <input type="number" class="steer-coeff-input" min="-1" max="1" step="0.001" value="${coefficient}" />
         <button type="button" class="btn-remove" title="Remove">×</button>
     `;
 
-    // Add event listeners
+    // Add event listeners - sync slider and numeric input bidirectionally
     const slider = row.querySelector('.steer-feature-coeff');
-    const display = row.querySelector('.steer-coeff-display');
+    const numericInput = row.querySelector('.steer-coeff-input');
+
     slider.addEventListener('input', () => {
-        display.textContent = parseFloat(slider.value).toFixed(2);
+        numericInput.value = parseFloat(slider.value).toFixed(3);
+    });
+
+    numericInput.addEventListener('input', () => {
+        let val = parseFloat(numericInput.value);
+        if (!isNaN(val)) {
+            val = Math.max(-1, Math.min(1, val)); // Clamp to range
+            slider.value = val;
+        }
+    });
+
+    numericInput.addEventListener('blur', () => {
+        let val = parseFloat(numericInput.value);
+        if (isNaN(val)) val = 0;
+        val = Math.max(-1, Math.min(1, val));
+        numericInput.value = val;
+        slider.value = val;
     });
 
     const removeBtn = row.querySelector('.btn-remove');
@@ -702,7 +794,9 @@ function getSteeringFeatures() {
     const features = [];
     steerFeaturesList.querySelectorAll('.steer-feature-row').forEach(row => {
         const featureId = parseInt(row.querySelector('.steer-feature-id').value);
-        const coefficient = parseFloat(row.querySelector('.steer-feature-coeff').value);
+        // Read from numeric input for higher precision
+        const coeffInput = row.querySelector('.steer-coeff-input');
+        const coefficient = coeffInput ? parseFloat(coeffInput.value) : parseFloat(row.querySelector('.steer-feature-coeff').value);
         const layerInput = row.querySelector('.steer-feature-layer');
         const layer = layerInput ? parseInt(layerInput.value) : selectedLayer;
 
@@ -717,10 +811,29 @@ function initSteeringSliders() {
     // Initialize event listeners for the initial row
     steerFeaturesList.querySelectorAll('.steer-feature-row').forEach(row => {
         const slider = row.querySelector('.steer-feature-coeff');
-        const display = row.querySelector('.steer-coeff-display');
-        slider.addEventListener('input', () => {
-            display.textContent = parseFloat(slider.value).toFixed(2);
-        });
+        const numericInput = row.querySelector('.steer-coeff-input');
+
+        if (slider && numericInput) {
+            slider.addEventListener('input', () => {
+                numericInput.value = parseFloat(slider.value).toFixed(3);
+            });
+
+            numericInput.addEventListener('input', () => {
+                let val = parseFloat(numericInput.value);
+                if (!isNaN(val)) {
+                    val = Math.max(-1, Math.min(1, val));
+                    slider.value = val;
+                }
+            });
+
+            numericInput.addEventListener('blur', () => {
+                let val = parseFloat(numericInput.value);
+                if (isNaN(val)) val = 0;
+                val = Math.max(-1, Math.min(1, val));
+                numericInput.value = val;
+                slider.value = val;
+            });
+        }
 
         const removeBtn = row.querySelector('.btn-remove');
         removeBtn.addEventListener('click', () => {
@@ -843,7 +956,8 @@ let comparisonResult = null;
 let refusalResult = null;
 let rankingResult = null;
 let pairIndex = 1;
-let uploadedPairsData = null;  // Store uploaded JSON data
+let singleCategoryMode = false; // Whether we're ranking single category prompts
+let singleCategoryType = 'harmful'; // 'harmful' or 'harmless'
 
 // Preset prompt pairs for batch analysis
 const PRESET_PAIRS = [
@@ -906,6 +1020,19 @@ async function rankFeaturesAPI(pairs, topK = 100) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt_pairs: pairs, top_k: topK })
+    });
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Ranking failed');
+    }
+    return response.json();
+}
+
+async function rankFeaturesSingleAPI(prompts, category, topK = 100) {
+    const response = await fetch('/api/rank-features-single', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompts, category, top_k: topK })
     });
     if (!response.ok) {
         const error = await response.json();
@@ -1140,21 +1267,18 @@ function renderRankingResults(result, layer) {
         return;
     }
 
-    let html = `
-        <table class="ranking-table">
-            <thead>
-                <tr>
-                    <th>Rank</th>
-                    <th>Feature</th>
-                    <th>Consistency</th>
-                    <th>Harmful</th>
-                    <th>Benign</th>
-                    <th>Score</th>
-                    <th></th>
-                </tr>
-            </thead>
-            <tbody>
-    `;
+    // Detect if this is single-category mode (has 'category' field)
+    const isSingleCategory = result.category !== undefined;
+
+    let html = '<table class="ranking-table"><thead><tr>';
+    html += '<th>Rank</th><th>Feature</th>';
+
+    if (isSingleCategory) {
+        html += `<th>Mean Activation</th>`;
+    } else {
+        html += '<th>Consistency</th><th>Harmful</th><th>Benign</th><th>Score</th>';
+    }
+    html += '<th></th></tr></thead><tbody>';
 
     layerData.ranked_features.forEach((feat, idx) => {
         html += `
@@ -1163,14 +1287,20 @@ function renderRankingResults(result, layer) {
                 data-layer="${layer}"
                 data-np-url="${feat.neuronpedia_url}">
                 <td>${idx + 1}</td>
-                <td class="feature-id">#${feat.feature_id}</td>
+                <td class="feature-id">#${feat.feature_id}</td>`;
+
+        if (isSingleCategory) {
+            html += `<td>${feat.mean_activation.toFixed(4)}</td>`;
+        } else {
+            html += `
                 <td>${(feat.consistency_score * 100).toFixed(1)}%</td>
                 <td>${feat.mean_harmful_activation.toFixed(3)}</td>
                 <td>${feat.mean_benign_activation.toFixed(3)}</td>
-                <td>${feat.differential_score.toFixed(4)}</td>
-                <td><button class="add-to-steering-btn" title="Add to Steering Queue">+</button></td>
-            </tr>
-        `;
+                <td>${feat.differential_score.toFixed(4)}</td>`;
+        }
+
+        html += `<td><button class="add-to-steering-btn" title="Add to Steering Queue">+</button></td>
+            </tr>`;
     });
 
     html += '</tbody></table>';
@@ -1265,6 +1395,8 @@ function loadPresetPairs() {
     const container = document.getElementById('prompt-pairs-container');
     container.innerHTML = '';
     pairIndex = 0;
+    singleCategoryMode = false;
+    updateAddButtonText();
     PRESET_PAIRS.forEach(pair => addPromptPair(pair.harmful, pair.benign));
 }
 
@@ -1359,6 +1491,47 @@ document.getElementById('refusal-form').addEventListener('submit', async (e) => 
 
 // Rank button
 document.getElementById('rank-btn').addEventListener('click', async () => {
+    const rankBtn = document.getElementById('rank-btn');
+
+    // Check if we're in single-category mode
+    if (singleCategoryMode) {
+        const prompts = getSingleCategoryPrompts();
+
+        if (prompts.length === 0) {
+            setStatus('Add at least one prompt');
+            return;
+        }
+
+        setLoading(rankBtn, true);
+        setStatus(`Ranking features across ${prompts.length} ${singleCategoryType} prompts...`);
+
+        try {
+            rankingResult = await rankFeaturesSingleAPI(prompts, singleCategoryType);
+
+            const layers = rankingResult.available_layers;
+            const firstLayer = layers[0];
+
+            renderLayerTabs('ranking-layer-tabs', layers, firstLayer, (layer) => {
+                renderRankingResults(rankingResult, layer);
+            });
+
+            renderRankingResults(rankingResult, firstLayer);
+
+            document.getElementById('export-rank-json').disabled = false;
+            document.getElementById('export-rank-csv').disabled = false;
+
+            setStatus(`Ranking complete - analyzed ${prompts.length} ${singleCategoryType} prompts`);
+        } catch (error) {
+            setStatus(`Error: ${error.message}`);
+            document.getElementById('ranking-results').innerHTML =
+                `<span class="placeholder" style="color: var(--accent-red)">Error: ${escapeHtml(error.message)}</span>`;
+        } finally {
+            setLoading(rankBtn, false);
+        }
+        return;
+    }
+
+    // Paired mode
     const pairs = getPromptPairs();
 
     if (pairs.length === 0) {
@@ -1366,7 +1539,6 @@ document.getElementById('rank-btn').addEventListener('click', async () => {
         return;
     }
 
-    const rankBtn = document.getElementById('rank-btn');
     setLoading(rankBtn, true);
     setStatus(`Ranking features across ${pairs.length} prompt pairs...`);
 
@@ -1395,8 +1567,14 @@ document.getElementById('rank-btn').addEventListener('click', async () => {
     }
 });
 
-// Add pair button
-document.getElementById('add-pair-btn').addEventListener('click', () => addPromptPair());
+// Add pair/prompt button - handles both modes
+document.getElementById('add-pair-btn').addEventListener('click', () => {
+    if (singleCategoryMode) {
+        addSinglePrompt();
+    } else {
+        addPromptPair();
+    }
+});
 
 // Load preset button
 document.getElementById('load-preset-btn').addEventListener('click', loadPresetPairs);
@@ -1404,98 +1582,181 @@ document.getElementById('load-preset-btn').addEventListener('click', loadPresetP
 // Clear all pairs button
 document.getElementById('clear-pairs-btn').addEventListener('click', clearAllPairs);
 
-// File upload handling
-const pairsFileInput = document.getElementById('pairs-file-input');
+// Unified file upload handling
+const fileInput = document.getElementById('file-input');
 const loadFileBtn = document.getElementById('load-file-btn');
-const uploadFilename = document.getElementById('upload-filename');
-const pairsCountInput = document.getElementById('pairs-count-input');
+const uploadCountInput = document.getElementById('upload-count-input');
+const uploadTypeSelect = document.getElementById('upload-type-select');
+const uploadCountLabel = document.getElementById('upload-count-label');
 
-pairsFileInput.addEventListener('change', handleFileSelect);
-loadFileBtn.addEventListener('click', loadPairsFromFile);
+let uploadedFileData = null;
+let uploadedFileType = 'json';
+
+// Update UI when upload type changes
+uploadTypeSelect.addEventListener('change', () => {
+    const type = uploadTypeSelect.value;
+    uploadedFileType = type;
+
+    // Update count label
+    if (type === 'json') {
+        uploadCountLabel.textContent = 'pairs';
+    } else {
+        uploadCountLabel.textContent = 'prompts';
+    }
+
+    // Reset file selection when type changes
+    fileInput.value = '';
+    loadFileBtn.disabled = true;
+    uploadedFileData = null;
+});
+
+fileInput.addEventListener('change', handleFileSelect);
+loadFileBtn.addEventListener('click', loadFromFile);
+
+// Auto-size upload count input
+autoSizeInput(uploadCountInput, 45);
+uploadCountInput.addEventListener('input', () => autoSizeInput(uploadCountInput, 45));
 
 function handleFileSelect(e) {
     const file = e.target.files[0];
     if (!file) {
-        uploadFilename.textContent = 'No file selected';
         loadFileBtn.disabled = true;
-        uploadedPairsData = null;
+        uploadedFileData = null;
         return;
     }
 
-    uploadFilename.textContent = file.name;
+    const type = uploadTypeSelect.value;
 
     const reader = new FileReader();
     reader.onload = function(event) {
         try {
-            const data = JSON.parse(event.target.result);
-
-            // Support both {pairs: [...]} and direct array format
-            if (data.pairs && Array.isArray(data.pairs)) {
-                uploadedPairsData = data.pairs;
-            } else if (Array.isArray(data)) {
-                uploadedPairsData = data;
+            if (type === 'json') {
+                // Parse JSON pairs
+                const data = JSON.parse(event.target.result);
+                if (data.pairs && Array.isArray(data.pairs)) {
+                    uploadedFileData = data.pairs;
+                } else if (Array.isArray(data)) {
+                    uploadedFileData = data;
+                } else {
+                    throw new Error('Invalid format: expected {pairs: [...]} or array');
+                }
             } else {
-                throw new Error('Invalid format: expected {pairs: [...]} or array');
+                // Parse TXT (newline-separated prompts)
+                const lines = event.target.result.split('\n')
+                    .map(line => line.trim())
+                    .filter(line => line.length > 0);
+                if (lines.length === 0) {
+                    throw new Error('No prompts found in file');
+                }
+                uploadedFileData = lines;
             }
 
-            // Update max value based on available pairs
-            const totalPairs = uploadedPairsData.length;
-            pairsCountInput.max = totalPairs;
-
-            // Set a reasonable default (min of 10 or total pairs)
-            pairsCountInput.value = Math.min(10, totalPairs);
-
+            const total = uploadedFileData.length;
+            uploadCountInput.max = total;
+            uploadCountInput.value = Math.min(10, total);
+            autoSizeInput(uploadCountInput, 45);
             loadFileBtn.disabled = false;
-            setStatus(`Loaded ${totalPairs} pairs from file. Select count and click "Load Pairs".`);
+
+            const itemType = type === 'json' ? 'pairs' : 'prompts';
+            setStatus(`Found ${total} ${itemType}. Select count and click "Import".`);
         } catch (error) {
-            uploadFilename.textContent = 'Invalid JSON file';
             loadFileBtn.disabled = true;
-            uploadedPairsData = null;
-            setStatus(`Error parsing JSON: ${error.message}`);
+            uploadedFileData = null;
+            setStatus(`Error: ${error.message}`);
         }
     };
 
     reader.onerror = function() {
-        uploadFilename.textContent = 'Error reading file';
         loadFileBtn.disabled = true;
-        uploadedPairsData = null;
+        uploadedFileData = null;
         setStatus('Error reading file');
     };
 
     reader.readAsText(file);
 }
 
-function loadPairsFromFile() {
-    if (!uploadedPairsData || uploadedPairsData.length === 0) {
-        setStatus('No pairs data available');
+function loadFromFile() {
+    if (!uploadedFileData || uploadedFileData.length === 0) {
+        setStatus('No data available');
         return;
     }
 
-    const count = parseInt(pairsCountInput.value) || 10;
-    const pairsToLoad = uploadedPairsData.slice(0, count);
+    const count = parseInt(uploadCountInput.value) || 10;
+    const type = uploadTypeSelect.value;
+    const itemsToLoad = uploadedFileData.slice(0, count);
 
-    // Clear existing pairs
     const container = document.getElementById('prompt-pairs-container');
     container.innerHTML = '';
     pairIndex = 0;
 
-    // Add pairs from file
-    pairsToLoad.forEach(pair => {
-        // Support both "harmless" and "benign" keys
-        const harmful = pair.harmful || '';
-        const benign = pair.harmless || pair.benign || '';
-        addPromptPair(harmful, benign);
-    });
-
-    setStatus(`Loaded ${pairsToLoad.length} prompt pairs`);
+    if (type === 'json') {
+        // Load as pairs
+        singleCategoryMode = false;
+        updateAddButtonText();
+        itemsToLoad.forEach(pair => {
+            const harmful = pair.harmful || '';
+            const benign = pair.harmless || pair.benign || '';
+            addPromptPair(harmful, benign);
+        });
+        setStatus(`Loaded ${itemsToLoad.length} prompt pairs`);
+    } else {
+        // Load as single-category prompts
+        const category = type === 'txt-harmful' ? 'harmful' : 'harmless';
+        singleCategoryMode = true;
+        singleCategoryType = category;
+        updateAddButtonText();
+        itemsToLoad.forEach(prompt => addSinglePrompt(prompt));
+        setStatus(`Loaded ${itemsToLoad.length} ${category} prompts`);
+    }
 }
 
 function clearAllPairs() {
     const container = document.getElementById('prompt-pairs-container');
     container.innerHTML = '';
     pairIndex = 0;
+    singleCategoryMode = false;
+    updateAddButtonText();
     addPromptPair(); // Add one empty row
-    setStatus('Cleared all pairs');
+    setStatus('Cleared all');
+}
+
+// Update the Add button text based on mode
+function updateAddButtonText() {
+    const addBtn = document.getElementById('add-pair-btn');
+    addBtn.textContent = singleCategoryMode ? '+ Add Prompt' : '+ Add Pair';
+}
+
+// Add a single prompt row (for single-category mode)
+function addSinglePrompt(value = '') {
+    const container = document.getElementById('prompt-pairs-container');
+    const row = document.createElement('div');
+    row.className = 'prompt-single-row';
+    row.dataset.index = pairIndex++;
+
+    row.innerHTML = `
+        <input type="text" class="single-prompt" placeholder="${singleCategoryType} prompt" value="${escapeHtml(value)}" />
+        <button type="button" class="btn-remove-pair" title="Remove">×</button>
+    `;
+
+    row.querySelector('.btn-remove-pair').addEventListener('click', () => {
+        if (container.children.length > 1) {
+            row.remove();
+        }
+    });
+
+    container.appendChild(row);
+}
+
+// Get single-category prompts from UI
+function getSingleCategoryPrompts() {
+    const prompts = [];
+    document.querySelectorAll('.prompt-single-row').forEach(row => {
+        const prompt = row.querySelector('.single-prompt').value.trim();
+        if (prompt) {
+            prompts.push(prompt);
+        }
+    });
+    return prompts;
 }
 
 // Export buttons
@@ -1591,7 +1852,7 @@ function renderSteeringQueue() {
             <div class="queue-item" data-index="${idx}">
                 <span class="queue-feature">L${item.layer} #${item.feature_id}</span>
                 <input type="range" class="queue-coeff-slider" min="-1" max="1" step="0.05" value="${item.coefficient}" />
-                <input type="number" class="queue-coeff-input" step="any" value="${item.coefficient}" />
+                <input type="number" class="queue-coeff-input" step="0.00001" value="${item.coefficient}" />
                 <button class="queue-remove-btn" title="Remove">×</button>
             </div>
         `;
@@ -1606,10 +1867,14 @@ function renderSteeringQueue() {
         const slider = itemEl.querySelector('.queue-coeff-slider');
         const input = itemEl.querySelector('.queue-coeff-input');
 
+        // Auto-size input on initial render
+        autoSizeInput(input, 50);
+
         // Slider updates input
         slider.addEventListener('input', () => {
             const val = parseFloat(slider.value);
             input.value = val;
+            autoSizeInput(input, 50);
             updateQueueCoefficient(idx, val);
         });
 
@@ -1617,6 +1882,7 @@ function renderSteeringQueue() {
         input.addEventListener('input', () => {
             const val = parseFloat(input.value) || 0;
             slider.value = Math.max(-1, Math.min(1, val)); // Clamp slider display
+            autoSizeInput(input, 50);
             updateQueueCoefficient(idx, val);
         });
 
@@ -1648,6 +1914,8 @@ async function runSidebarSteering() {
     const prompt = document.getElementById('sidebar-prompt').value.trim();
     const maxTokens = parseInt(document.getElementById('sidebar-tokens').value);
     const normalization = document.getElementById('sidebar-normalization').value || null;
+    const unitNormalize = document.getElementById('sidebar-unit-normalize').checked;
+    const showBaseline = document.getElementById('sidebar-show-baseline').checked;
 
     if (!prompt) {
         setStatus('Please enter a prompt');
@@ -1668,26 +1936,37 @@ async function runSidebarSteering() {
             coefficient: item.coefficient
         }));
 
-        const result = await generateWithSteeringMulti(prompt, steeringFeatures, maxTokens, normalization);
+        const result = await generateWithSteeringMulti(prompt, steeringFeatures, maxTokens, normalization, unitNormalize, !showBaseline);
 
         // Format steering info
         let steeringInfo = steeringFeatures
             .map(s => `L${s.layer}:#${s.feature_id}: ${s.coefficient > 0 ? '+' : ''}${s.coefficient}`)
             .join(', ');
 
-        const normLabel = result.normalization ? ` (${result.normalization})` : '';
+        // Build normalization label from both options
+        const normParts = [];
+        if (result.unit_normalize) normParts.push('unit');
+        if (result.normalization) normParts.push(result.normalization.replace('_', '-'));
+        const normLabel = normParts.length > 0 ? ` (${normParts.join(' + ')})` : '';
 
-        output.innerHTML = `
-            <div class="output-section original">
-                <h4>Original Output</h4>
-                <div class="output-text">${escapeHtml(result.original_output)}</div>
-            </div>
+        // Build output HTML - only show baseline if it was generated
+        let outputHtml = '';
+        if (result.original_output !== null) {
+            outputHtml += `
+                <div class="output-section original">
+                    <h4>Original Output</h4>
+                    <div class="output-text">${escapeHtml(result.original_output)}</div>
+                </div>
+            `;
+        }
+        outputHtml += `
             <div class="output-section steered">
                 <h4>Steered Output${normLabel}</h4>
                 <p class="hint">Vectors: ${steeringInfo}</p>
                 <div class="output-text">${escapeHtml(result.steered_output)}</div>
             </div>
         `;
+        output.innerHTML = outputHtml;
         setStatus('Steering generation complete');
     } catch (error) {
         setStatus(`Error: ${error.message}`);
@@ -1797,6 +2076,211 @@ function initSidebarResize() {
 }
 
 // =============================================================================
+// Settings Modal
+// =============================================================================
+
+function openSettingsModal() {
+    if (!settingsModal) return;
+    settingsModal.classList.remove('hidden');
+}
+
+function closeSettingsModal() {
+    if (!settingsModal) return;
+    settingsModal.classList.add('hidden');
+}
+
+async function applySettings() {
+    if (!settingsApply) return;
+
+    const modelPath = configModelPath?.value?.trim();
+    const saeRepo = configSaeRepo?.value?.trim();
+    const saeWidth = configSaeWidth?.value;
+    const saeL0 = configSaeL0?.value;
+
+    // Check if anything changed
+    const hasChanges =
+        (modelPath && modelPath !== currentConfig?.model_path) ||
+        (saeRepo && saeRepo !== currentConfig?.sae_repo) ||
+        (saeWidth && saeWidth !== currentConfig?.sae_width) ||
+        (saeL0 && saeL0 !== currentConfig?.sae_l0);
+
+    if (!hasChanges) {
+        closeSettingsModal();
+        return;
+    }
+
+    setLoading(settingsApply, true);
+    setStatus('Updating configuration...');
+
+    try {
+        const result = await updateConfig(modelPath, saeRepo, saeWidth, saeL0);
+
+        if (result.success) {
+            // Clear caches since model changed
+            layerDataCache = {};
+            currentAnalysis = null;
+            selectedLayer = null;
+
+            // Refresh config
+            await fetchConfig();
+
+            setStatus('Configuration updated. Model will load on next analysis.');
+            closeSettingsModal();
+        } else {
+            setStatus(`Error: ${result.error}`);
+        }
+    } catch (error) {
+        setStatus(`Error: ${error.message}`);
+    } finally {
+        setLoading(settingsApply, false);
+    }
+}
+
+function initSettingsModal() {
+    if (!settingsBtn || !settingsModal) return;
+
+    settingsBtn.addEventListener('click', openSettingsModal);
+    settingsClose?.addEventListener('click', closeSettingsModal);
+    settingsCancel?.addEventListener('click', closeSettingsModal);
+    settingsApply?.addEventListener('click', applySettings);
+
+    // Close on overlay click
+    settingsModal.addEventListener('click', (e) => {
+        if (e.target === settingsModal) {
+            closeSettingsModal();
+        }
+    });
+
+    // Close on Escape key
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !settingsModal.classList.contains('hidden')) {
+            closeSettingsModal();
+        }
+    });
+}
+
+// =============================================================================
+// Bake In Modal
+// =============================================================================
+
+async function applySteeringPermanent(features, outputPath, scaleFactor) {
+    const response = await fetch('/api/apply-steering-permanent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            features: features,
+            output_path: outputPath,
+            scale_factor: scaleFactor,
+        })
+    });
+
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to apply steering');
+    }
+
+    return await response.json();
+}
+
+function openBakeInModal() {
+    if (!bakeInModal) return;
+
+    // Get current steering queue
+    const features = steeringQueue.filter(f => f.coefficient !== 0);
+
+    if (features.length === 0) {
+        setStatus('No features in steering queue to bake in');
+        return;
+    }
+
+    // Update features info
+    if (bakeInFeaturesInfo) {
+        const layers = [...new Set(features.map(f => f.layer))];
+        bakeInFeaturesInfo.textContent = `${features.length} feature(s) across layer(s): ${layers.join(', ')}`;
+    }
+
+    // Suggest output path based on current model path
+    if (bakeInPath && currentConfig?.model_path) {
+        const basePath = currentConfig.model_path.replace(/[/\\]$/, '');
+        bakeInPath.value = basePath + '-steered';
+    }
+
+    bakeInModal.classList.remove('hidden');
+}
+
+function closeBakeInModal() {
+    if (!bakeInModal) return;
+    bakeInModal.classList.add('hidden');
+}
+
+async function executeBakeIn() {
+    if (!bakeInApply) return;
+
+    const outputPath = bakeInPath?.value?.trim();
+    const scaleFactor = parseFloat(bakeInScale?.value) || 1.0;
+
+    if (!outputPath) {
+        setStatus('Please specify an output path');
+        return;
+    }
+
+    // Get features from steering queue
+    const features = steeringQueue
+        .filter(f => f.coefficient !== 0)
+        .map(f => ({
+            layer: f.layer,
+            feature_id: f.feature_id,
+            coefficient: f.coefficient,
+        }));
+
+    if (features.length === 0) {
+        setStatus('No features to bake in');
+        return;
+    }
+
+    setLoading(bakeInApply, true);
+    setStatus('Applying steering vectors to model weights...');
+
+    try {
+        const result = await applySteeringPermanent(features, outputPath, scaleFactor);
+
+        if (result.success) {
+            setStatus(`Model saved to ${result.output_path} with ${result.total_features} feature(s) baked in`);
+            closeBakeInModal();
+        } else {
+            setStatus(`Error: ${result.error}`);
+        }
+    } catch (error) {
+        setStatus(`Error: ${error.message}`);
+    } finally {
+        setLoading(bakeInApply, false);
+    }
+}
+
+function initBakeInModal() {
+    if (!bakeInBtn || !bakeInModal) return;
+
+    bakeInBtn.addEventListener('click', openBakeInModal);
+    bakeInClose?.addEventListener('click', closeBakeInModal);
+    bakeInCancel?.addEventListener('click', closeBakeInModal);
+    bakeInApply?.addEventListener('click', executeBakeIn);
+
+    // Close on overlay click
+    bakeInModal.addEventListener('click', (e) => {
+        if (e.target === bakeInModal) {
+            closeBakeInModal();
+        }
+    });
+
+    // Close on Escape key
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !bakeInModal.classList.contains('hidden')) {
+            closeBakeInModal();
+        }
+    });
+}
+
+// =============================================================================
 // Initialization
 // =============================================================================
 
@@ -1804,5 +2288,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchConfig();
     initSteeringSliders();
     initSteeringSidebar();
+    initSettingsModal();
+    initBakeInModal();
     setStatus('Ready - enter a prompt and click Analyze');
 });

@@ -185,18 +185,21 @@ def steer_generation():
             "prompt": "Tell me a fun fact",
             "steering": [{"feature_id": 123, "coefficient": 0.25, "layer": 12}],
             "max_tokens": 80,
-            "normalization": "preserve_norm",  // Optional: "preserve_norm", "clamp", "unit_steer", or null
-            "norm_clamp_factor": 1.5           // Optional: for "clamp" mode
+            "normalization": "preserve_norm",  // Optional: "preserve_norm", "clamp", or null
+            "norm_clamp_factor": 1.5,          // Optional: for "clamp" mode
+            "unit_normalize": true,            // Optional: normalize decoder vectors to unit norm
+            "skip_baseline": false             // Optional: skip baseline generation
         }
 
     Response JSON:
         {
             "prompt": "...",
-            "original_output": "...",
+            "original_output": "..." or null,  // null if skip_baseline is true
             "steered_output": "...",
             "steering_applied": [...],
             "steering_layers": [12, 24],
-            "normalization": "preserve_norm"
+            "normalization": "preserve_norm",
+            "unit_normalize": true
         }
     """
     data = request.get_json()
@@ -205,12 +208,14 @@ def steer_generation():
     max_tokens = data.get("max_tokens", 80)
     normalization = data.get("normalization", None)
     norm_clamp_factor = data.get("norm_clamp_factor", 1.5)
+    unit_normalize = data.get("unit_normalize", False)
+    skip_baseline = data.get("skip_baseline", False)
 
     if not prompt.strip():
         return jsonify({"error": "Prompt cannot be empty"}), 400
 
     # Validate normalization mode
-    valid_modes = [None, "preserve_norm", "clamp", "unit_steer"]
+    valid_modes = [None, "preserve_norm", "clamp"]
     if normalization not in valid_modes:
         return jsonify({"error": f"Invalid normalization mode. Use one of: {valid_modes}"}), 400
 
@@ -227,6 +232,8 @@ def steer_generation():
             max_new_tokens=max_tokens,
             normalization=normalization,
             norm_clamp_factor=norm_clamp_factor,
+            unit_normalize=unit_normalize,
+            skip_baseline=skip_baseline,
         )
         return jsonify(result)
     except Exception as e:
@@ -236,16 +243,87 @@ def steer_generation():
 @app.route("/api/config", methods=["GET"])
 def get_config():
     """Get current SAE configuration."""
-    from sae_model import NEURONPEDIA_LAYERS
+    from sae_model import get_neuronpedia_layers
     manager = get_manager()
     return jsonify({
         "model_path": manager.model_path,
+        "sae_repo": manager.sae_repo,
         "sae_layers": manager.sae_layers,
         "sae_width": manager.sae_width,
         "sae_l0": manager.sae_l0,
         "device": manager.device,
-        "neuronpedia_layers": NEURONPEDIA_LAYERS,
+        "neuronpedia_layers": get_neuronpedia_layers(manager.sae_repo),
     })
+
+
+@app.route("/api/config", methods=["POST"])
+def update_config():
+    """Update SAE configuration and reload models."""
+    data = request.get_json()
+
+    model_path = data.get("model_path")
+    sae_repo = data.get("sae_repo")
+    sae_width = data.get("sae_width")
+    sae_l0 = data.get("sae_l0")
+
+    try:
+        manager = get_manager()
+        new_config = manager.reconfigure(
+            model_path=model_path,
+            sae_repo=sae_repo,
+            sae_width=sae_width,
+            sae_l0=sae_l0,
+        )
+        return jsonify({"success": True, "config": new_config})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/apply-steering-permanent", methods=["POST"])
+def apply_steering_permanent():
+    """
+    Apply steering vectors permanently to model weights and save.
+
+    Request JSON:
+        {
+            "features": [
+                {"layer": 17, "feature_id": 12345, "coefficient": 0.5},
+                {"layer": 17, "feature_id": 67890, "coefficient": -0.3}
+            ],
+            "output_path": "/path/to/save/modified-model",
+            "scale_factor": 1.0  # Optional, default 1.0
+        }
+
+    Response:
+        {
+            "success": true,
+            "output_path": "/path/to/saved/model",
+            "modifications": [...],
+            "total_features": 2
+        }
+    """
+    data = request.get_json()
+
+    features = data.get("features", [])
+    output_path = data.get("output_path")
+    scale_factor = data.get("scale_factor", 1.0)
+
+    if not features:
+        return jsonify({"success": False, "error": "No features provided"}), 400
+
+    if not output_path:
+        return jsonify({"success": False, "error": "No output_path provided"}), 400
+
+    try:
+        manager = get_manager()
+        result = manager.apply_steering_to_weights(
+            features=features,
+            output_path=output_path,
+            scale_factor=scale_factor,
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # =============================================================================
@@ -373,6 +451,50 @@ def rank_features():
     try:
         manager = get_manager()
         result = manager.rank_features_for_refusal(prompt_pairs, top_k=top_k)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/rank-features-single", methods=["POST"])
+def rank_features_single():
+    """
+    Rank features by activation strength on a single category of prompts.
+
+    Request JSON:
+        {
+            "prompts": ["prompt1", "prompt2", ...],
+            "category": "harmful" or "harmless",
+            "top_k": 100
+        }
+
+    Response JSON:
+        {
+            "num_prompts": 10,
+            "category": "harmful",
+            "layers": {
+                "12": {
+                    "ranked_features": [
+                        {"feature_id": 123, "mean_activation": 0.5, ...}
+                    ]
+                }
+            }
+        }
+    """
+    data = request.get_json()
+    prompts = data.get("prompts", [])
+    category = data.get("category", "harmful")
+    top_k = data.get("top_k", 100)
+
+    if not prompts:
+        return jsonify({"error": "At least one prompt is required"}), 400
+
+    if category not in ("harmful", "harmless"):
+        return jsonify({"error": "Category must be 'harmful' or 'harmless'"}), 400
+
+    try:
+        manager = get_manager()
+        result = manager.rank_features_single_category(prompts, category=category, top_k=top_k)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

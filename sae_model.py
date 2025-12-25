@@ -133,13 +133,15 @@ class SAEModelManager:
     def __init__(
         self,
         model_path: str = MODEL_PATH,
-        sae_layers: list[int] = SAE_LAYERS,
+        sae_repo: str = SAE_REPO,
+        sae_layers: list[int] = None,
         sae_width: str = SAE_WIDTH,
         sae_l0: str = SAE_L0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         self.model_path = model_path
-        self.sae_layers = sae_layers
+        self.sae_repo = sae_repo
+        self.sae_layers = sae_layers if sae_layers is not None else get_available_layers(sae_repo)
         self.sae_width = sae_width
         self.sae_l0 = sae_l0
         self.device = device
@@ -152,6 +154,193 @@ class SAEModelManager:
 
         # Disable gradients globally for inference
         torch.set_grad_enabled(False)
+
+    def unload(self):
+        """Unload all models and clear caches to free memory."""
+        global _residual_cache, _neuronpedia_cache
+
+        # Clear SAEs
+        for sae in self._saes.values():
+            del sae
+        self._saes.clear()
+
+        # Clear model
+        if self._model is not None:
+            del self._model
+            self._model = None
+
+        # Clear tokenizer
+        if self._tokenizer is not None:
+            del self._tokenizer
+            self._tokenizer = None
+
+        self._layers = None
+
+        # Clear caches
+        _residual_cache.clear()
+        _neuronpedia_cache.clear()
+
+        # Force garbage collection
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        print("Models unloaded and caches cleared.")
+
+    def reconfigure(
+        self,
+        model_path: str = None,
+        sae_repo: str = None,
+        sae_width: str = None,
+        sae_l0: str = None,
+    ) -> dict:
+        """
+        Reconfigure the manager with new settings.
+
+        Args:
+            model_path: New model path (local or HuggingFace ID)
+            sae_repo: New SAE repository
+            sae_width: New SAE width (16k, 65k, 262k, 1M)
+            sae_l0: New SAE L0 (small, medium, large)
+
+        Returns:
+            Dictionary with new configuration
+        """
+        # Unload current models
+        self.unload()
+
+        # Update configuration
+        if model_path is not None:
+            self.model_path = model_path
+        if sae_repo is not None:
+            self.sae_repo = sae_repo
+            self.sae_layers = get_available_layers(sae_repo)
+        if sae_width is not None:
+            self.sae_width = sae_width
+        if sae_l0 is not None:
+            self.sae_l0 = sae_l0
+
+        return {
+            "model_path": self.model_path,
+            "sae_repo": self.sae_repo,
+            "sae_layers": self.sae_layers,
+            "sae_width": self.sae_width,
+            "sae_l0": self.sae_l0,
+            "device": self.device,
+            "neuronpedia_layers": get_neuronpedia_layers(self.sae_repo),
+        }
+
+    def apply_steering_to_weights(
+        self,
+        features: list[dict],
+        output_path: str,
+        scale_factor: float = 1.0,
+    ) -> dict:
+        """
+        Apply steering vectors permanently to model weights and save.
+
+        This modifies the model's MLP output projection bias (or adds one if
+        it doesn't exist) to incorporate the steering effect permanently.
+
+        Args:
+            features: List of {layer, feature_id, coefficient} dicts
+            output_path: Path to save the modified model
+            scale_factor: Additional scaling for the steering vectors (default 1.0)
+
+        Returns:
+            Dictionary with status and details
+        """
+        import os
+        from copy import deepcopy
+
+        # Ensure model is loaded
+        _ = self.model
+
+        # Group features by layer
+        layer_features: dict[int, list[dict]] = {}
+        for feat in features:
+            layer = feat.get("layer", self.sae_layers[0] if self.sae_layers else 0)
+            if layer not in layer_features:
+                layer_features[layer] = []
+            layer_features[layer].append(feat)
+
+        modifications = []
+
+        with torch.no_grad():
+            for layer_idx, feats in layer_features.items():
+                # Load SAE for this layer
+                sae = self.get_sae(layer_idx)
+
+                # Get the layer's MLP down projection
+                layer = self.layers[layer_idx]
+
+                # Find the MLP down_proj - handle different architectures
+                mlp = None
+                down_proj = None
+                if hasattr(layer, 'mlp'):
+                    mlp = layer.mlp
+                    if hasattr(mlp, 'down_proj'):
+                        down_proj = mlp.down_proj
+                elif hasattr(layer, 'feed_forward'):
+                    mlp = layer.feed_forward
+                    if hasattr(mlp, 'w2'):  # Some models use w2 for down projection
+                        down_proj = mlp.w2
+
+                if down_proj is None:
+                    # Try to find any linear layer we can modify
+                    for name, module in layer.named_modules():
+                        if 'down' in name.lower() and hasattr(module, 'weight'):
+                            down_proj = module
+                            break
+
+                if down_proj is None:
+                    raise ValueError(f"Could not find MLP down projection for layer {layer_idx}")
+
+                # Calculate combined steering vector for this layer
+                combined_steering = torch.zeros(down_proj.weight.shape[0], device=self.device, dtype=torch.bfloat16)
+
+                for feat in feats:
+                    feat_idx = feat["feature_id"]
+                    coeff = feat["coefficient"] * scale_factor
+
+                    # Get decoder vector
+                    decoder_vec = sae.w_dec[feat_idx].to(self.device).to(torch.bfloat16)
+
+                    # Add to combined steering (decoder_vec is d_model dimensional)
+                    combined_steering += coeff * decoder_vec
+
+                # Add steering to the bias
+                if down_proj.bias is None:
+                    # Create and register a new bias parameter
+                    # Must use register_parameter so it's included in state_dict
+                    down_proj.register_parameter('bias', nn.Parameter(combined_steering.clone()))
+                    print(f"Created new bias for layer {layer_idx}")
+                else:
+                    # Add to existing bias
+                    down_proj.bias.data += combined_steering
+                    print(f"Modified existing bias for layer {layer_idx}")
+
+                modifications.append({
+                    "layer": layer_idx,
+                    "features": len(feats),
+                    "steering_norm": float(torch.norm(combined_steering).cpu()),
+                })
+
+        # Save the modified model
+        print(f"Saving modified model to {output_path}...")
+        os.makedirs(output_path, exist_ok=True)
+
+        # Save model and tokenizer
+        self._model.save_pretrained(output_path)
+        self.tokenizer.save_pretrained(output_path)
+
+        return {
+            "success": True,
+            "output_path": output_path,
+            "modifications": modifications,
+            "total_features": sum(len(lf) for lf in layer_features.values()),
+        }
 
     def _find_layers(self, model):
         """
@@ -289,7 +478,7 @@ class SAEModelManager:
     def _load_sae(self, layer: int) -> JumpReLUSAE:
         """Download and load SAE weights from HuggingFace for a specific layer."""
         path_to_params = hf_hub_download(
-            repo_id=SAE_REPO,
+            repo_id=self.sae_repo,
             filename=f"resid_post/layer_{layer}_width_{self.sae_width}_l0_{self.sae_l0}/params.safetensors",
         )
         params = load_file(path_to_params)
@@ -603,6 +792,8 @@ class SAEModelManager:
         sae_layer: int = None,
         normalization: str = None,
         norm_clamp_factor: float = 1.5,
+        unit_normalize: bool = False,
+        skip_baseline: bool = False,
     ) -> dict:
         """
         Generate text with feature steering applied.
@@ -613,12 +804,14 @@ class SAEModelManager:
             max_new_tokens: Maximum tokens to generate
             steering_layer_offset: Layer offset from SAE layer for steering
             sae_layer: Default SAE layer for features without explicit layer
-            normalization: Normalization mode to prevent model degradation:
-                - None: No normalization (current behavior)
+            normalization: Post-steering normalization mode:
+                - None: No post-steering normalization
                 - "preserve_norm": Rescale output to maintain original norm after steering
                 - "clamp": Clamp norm change to norm_clamp_factor
-                - "unit_steer": Normalize decoder vector to unit norm before applying
             norm_clamp_factor: For "clamp" mode, max allowed norm change ratio (default 1.5)
+            unit_normalize: If True, normalize decoder vectors to unit norm before applying.
+                           Can be combined with any normalization mode.
+            skip_baseline: If True, skip generating baseline (non-steered) output.
 
         Returns:
             Dictionary with original and steered outputs
@@ -639,17 +832,19 @@ class SAEModelManager:
             add_special_tokens=True
         ).to(self.device)
 
-        # Generate without steering first
-        with torch.no_grad():
-            outputs_clean = self.model.generate(
-                input_ids=inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
+        # Generate without steering first (unless skipped)
+        original_output = None
+        if not skip_baseline:
+            with torch.no_grad():
+                outputs_clean = self.model.generate(
+                    input_ids=inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                )
+            original_output = self.tokenizer.decode(
+                outputs_clean[0][inputs.shape[1]:],
+                skip_special_tokens=True
             )
-        original_output = self.tokenizer.decode(
-            outputs_clean[0][inputs.shape[1]:],
-            skip_special_tokens=True
-        )
 
         if not steering_features:
             return {
@@ -674,7 +869,7 @@ class SAEModelManager:
             sae = self.get_sae(layer)
             steering_target_layer = layer + steering_layer_offset
 
-            def make_steering_hook(sae_ref, feats, norm_mode, clamp_factor):
+            def make_steering_hook(sae_ref, feats, norm_mode, clamp_factor, unit_norm):
                 def steering_hook(mod, inputs, outputs):
                     output = outputs[0]
 
@@ -688,12 +883,11 @@ class SAEModelManager:
                             coeff = sf["coefficient"]
                             decoder_vec = sae_ref.w_dec[feat_idx]
 
-                            if norm_mode == "unit_steer":
-                                # Normalize decoder vector to unit norm
+                            # Optionally normalize decoder vector to unit norm
+                            if unit_norm:
                                 decoder_vec = decoder_vec / (torch.norm(decoder_vec) + 1e-8)
-                                output += coeff * original_norm * decoder_vec
-                            else:
-                                output += coeff * original_norm * decoder_vec
+
+                            output += coeff * original_norm * decoder_vec
 
                         # Apply post-steering normalization
                         if norm_mode == "preserve_norm":
@@ -715,11 +909,11 @@ class SAEModelManager:
                             coeff = sf["coefficient"]
                             decoder_vec = sae_ref.w_dec[feat_idx]
 
-                            if norm_mode == "unit_steer":
+                            # Optionally normalize decoder vector to unit norm
+                            if unit_norm:
                                 decoder_vec = decoder_vec / (torch.norm(decoder_vec) + 1e-8)
-                                output[0, 1:] += coeff * original_norms * decoder_vec
-                            else:
-                                output[0, 1:] += coeff * original_norms * decoder_vec
+
+                            output[0, 1:] += coeff * original_norms * decoder_vec
 
                         # Apply post-steering normalization
                         if norm_mode == "preserve_norm":
@@ -737,7 +931,7 @@ class SAEModelManager:
                 return steering_hook
 
             handle = self.layers[steering_target_layer].register_forward_hook(
-                make_steering_hook(sae, layer_features, normalization, norm_clamp_factor)
+                make_steering_hook(sae, layer_features, normalization, norm_clamp_factor, unit_normalize)
             )
             handles.append(handle)
 
@@ -764,6 +958,7 @@ class SAEModelManager:
             "steering_applied": steering_features,
             "steering_layers": list(features_by_layer.keys()),
             "normalization": normalization,
+            "unit_normalize": unit_normalize,
         }
 
     def _find_lm_head(self):
@@ -1333,6 +1528,76 @@ class SAEModelManager:
 
         return {
             "num_prompt_pairs": num_pairs,
+            "layers": layers_data,
+            "available_layers": self.sae_layers,
+        }
+
+    def rank_features_single_category(
+        self,
+        prompts: list[str],
+        category: str = "harmful",
+        top_k: int = 100,
+    ) -> dict:
+        """
+        Rank features by their mean activation strength on a single category of prompts.
+
+        Args:
+            prompts: List of prompt strings
+            category: Label for the category ("harmful" or "harmless")
+            top_k: Number of top features to return per layer
+
+        Returns:
+            Dictionary with ranked features per layer
+        """
+        # Initialize accumulators per layer
+        activation_sums = {layer: None for layer in self.sae_layers}
+        num_prompts = len(prompts)
+
+        for prompt in prompts:
+            # Tokenize
+            inputs = self.tokenizer.encode(
+                prompt, return_tensors="pt", add_special_tokens=True
+            ).to(self.device)
+
+            # Get activations
+            residuals = self.gather_residual_activations(inputs)
+
+            for layer_idx in self.sae_layers:
+                sae = self.get_sae(layer_idx)
+                acts = sae.encode(residuals[layer_idx].to(torch.float32))
+                mean_act = acts[1:].mean(dim=0)  # Skip BOS
+
+                # Initialize accumulator on first prompt
+                if activation_sums[layer_idx] is None:
+                    activation_sums[layer_idx] = torch.zeros_like(mean_act)
+
+                activation_sums[layer_idx] += mean_act
+
+        # Compute rankings
+        layers_data = {}
+        for layer_idx in self.sae_layers:
+            if activation_sums[layer_idx] is None:
+                layers_data[layer_idx] = {"ranked_features": []}
+                continue
+
+            mean_activation = activation_sums[layer_idx] / num_prompts
+
+            # Get top features by mean activation
+            top_scores, top_indices = mean_activation.topk(top_k)
+
+            ranked_features = []
+            for score, feat_idx in zip(top_scores.tolist(), top_indices.tolist()):
+                ranked_features.append({
+                    "feature_id": feat_idx,
+                    "mean_activation": round(score, 4),
+                    "neuronpedia_url": self.get_neuronpedia_url(feat_idx, layer_idx),
+                })
+
+            layers_data[layer_idx] = {"ranked_features": ranked_features}
+
+        return {
+            "num_prompts": num_prompts,
+            "category": category,
             "layers": layers_data,
             "available_layers": self.sae_layers,
         }

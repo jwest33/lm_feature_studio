@@ -10,8 +10,11 @@
     <div class="container">
         <!-- Header -->
         <header class="header">
-            <h1>SAE Feature Explorer</h1>
-            <span class="subtitle">GemmaScope 2</span>
+            <div class="header-left">
+                <h1>SAE Feature Explorer</h1>
+                <span class="subtitle">GemmaScope 2</span>
+            </div>
+            <button class="settings-btn" id="settings-btn" title="Settings">&#9881;</button>
         </header>
 
         <!-- Mode Selector -->
@@ -95,8 +98,8 @@
                         <div id="steer-features-list">
                             <div class="steer-feature-row" data-index="0">
                                 <input type="number" class="steer-feature-id" min="0" value="0" placeholder="Feature ID" />
-                                <input type="range" class="steer-feature-coeff" min="-1" max="1" step="0.05" value="0.25" />
-                                <span class="steer-coeff-display">0.25</span>
+                                <input type="range" class="steer-feature-coeff" min="-1" max="1" step="0.01" value="0.25" />
+                                <input type="number" class="steer-coeff-input" min="-1" max="1" step="0.001" value="0.25" />
                                 <button type="button" class="btn-remove" title="Remove">×</button>
                             </div>
                         </div>
@@ -239,18 +242,22 @@
                     <!-- File Upload Section -->
                     <div class="upload-section">
                         <div class="upload-row">
-                            <div class="upload-file-group">
-                                <label for="pairs-file-input">Upload JSON</label>
-                                <input type="file" id="pairs-file-input" accept=".json" />
-                                <span id="upload-filename" class="upload-filename">No file selected</span>
+                            <div class="upload-file-input-group">
+                                <select id="upload-type-select" title="File type">
+                                    <option value="json">JSON</option>
+                                    <option value="txt-harmful">TXT (harmful)</option>
+                                    <option value="txt-harmless">TXT (harmless)</option>
+                                </select>
+                                <input type="file" id="file-input" accept=".json,.txt" />
                             </div>
-                            <div class="upload-count-group">
-                                <label for="pairs-count-input">Pairs to load</label>
-                                <input type="number" id="pairs-count-input" min="1" max="5000" value="10" />
+                            <div class="upload-load-group">
+                                <span class="upload-load-label">Load</span>
+                                <input type="number" id="upload-count-input" min="1" max="5000" value="10" title="Number of items to load" />
+                                <span class="upload-load-label" id="upload-count-label">pairs</span>
+                                <button type="button" id="load-file-btn" class="btn-small" disabled>Import</button>
                             </div>
-                            <button type="button" id="load-file-btn" class="btn-small" disabled>Load Pairs</button>
                         </div>
-                        <p class="hint upload-hint">Supports JSON with format: {"pairs": [{"harmful": "...", "harmless": "..."}]}</p>
+                        <p class="hint upload-hint" id="upload-hint-text">JSON: {"pairs": [{"harmful": "...", "harmless": "..."}]} | TXT: one prompt per line</p>
                     </div>
 
                     <div id="prompt-pairs-container">
@@ -332,19 +339,35 @@
                         <input type="number" id="sidebar-tokens" min="10" max="200" value="80" />
                     </div>
                     <div class="control-group">
-                        <label for="sidebar-normalization">Normalization</label>
+                        <label for="sidebar-normalization">Post-Steering Norm</label>
                         <select id="sidebar-normalization">
                             <option value="">None</option>
                             <option value="preserve_norm" selected>Preserve Norm</option>
                             <option value="clamp">Clamp (1.5x)</option>
-                            <option value="unit_steer">Unit Steering</option>
                         </select>
                     </div>
+                    <div class="control-group checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="sidebar-unit-normalize" />
+                            Unit Normalize
+                        </label>
+                    </div>
+                    <div class="control-group checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="sidebar-show-baseline" checked />
+                            Show Baseline
+                        </label>
+                    </div>
                 </div>
-                <button type="button" id="sidebar-steer-btn" class="btn-steer">
-                    <span class="btn-text">Generate with Steering</span>
-                    <span class="btn-loading hidden">Generating...</span>
-                </button>
+                <div class="btn-row">
+                    <button type="button" id="sidebar-steer-btn" class="btn-steer">
+                        <span class="btn-text">Generate with Steering</span>
+                        <span class="btn-loading hidden">Generating...</span>
+                    </button>
+                    <button type="button" id="bake-in-btn" class="btn-bake" title="Permanently apply steering to model weights">
+                        Bake In
+                    </button>
+                </div>
             </div>
 
             <div class="sidebar-output" id="sidebar-output">
@@ -352,6 +375,93 @@
             </div>
         </div>
     </aside>
+
+    <!-- Bake In Confirmation Modal -->
+    <div class="modal-overlay hidden" id="bake-in-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Bake In Steering Vectors</h3>
+                <button class="modal-close" id="bake-in-close">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-warning">
+                    This will permanently modify the model weights and save to a new location.
+                    The original model will not be modified.
+                </div>
+                <div class="form-group">
+                    <label for="bake-in-path">Output Path</label>
+                    <input type="text" id="bake-in-path" placeholder="Path to save modified model" />
+                    <span class="form-hint">e.g., D:\models\gemma-3-4b-it-steered</span>
+                </div>
+                <div class="form-group">
+                    <label for="bake-in-scale">Scale Factor</label>
+                    <input type="number" id="bake-in-scale" min="0.1" max="10" step="0.1" value="1.0" />
+                    <span class="form-hint">Multiplier for steering strength (1.0 = same as runtime steering)</span>
+                </div>
+                <div class="form-info" id="bake-in-features-info">
+                    No features in steering queue
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="bake-in-cancel">Cancel</button>
+                <button class="btn-primary btn-danger" id="bake-in-apply">
+                    <span class="btn-text">Apply & Save Model</span>
+                    <span class="btn-loading hidden">Saving...</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay hidden" id="settings-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Configuration</h3>
+                <button class="modal-close" id="settings-close">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="config-model-path">Model Path</label>
+                    <input type="text" id="config-model-path" placeholder="Local path or HuggingFace ID" />
+                    <span class="form-hint">e.g., google/gemma-3-4b-it or D:\models\gemma-3-4b-it</span>
+                </div>
+                <div class="form-group">
+                    <label for="config-sae-repo">SAE Repository</label>
+                    <input type="text" id="config-sae-repo" placeholder="HuggingFace SAE repo" />
+                    <span class="form-hint">e.g., google/gemma-scope-2-4b-it</span>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="config-sae-width">SAE Width</label>
+                        <select id="config-sae-width">
+                            <option value="16k">16k</option>
+                            <option value="65k">65k</option>
+                            <option value="262k" selected>262k</option>
+                            <option value="1M">1M</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="config-sae-l0">SAE L0</label>
+                        <select id="config-sae-l0">
+                            <option value="small">small</option>
+                            <option value="medium">medium</option>
+                            <option value="large">large</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-info" id="config-layers-info">
+                    Available layers will be shown after loading
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="settings-cancel">Cancel</button>
+                <button class="btn-primary" id="settings-apply">
+                    <span class="btn-text">Apply & Reload</span>
+                    <span class="btn-loading hidden">Applying...</span>
+                </button>
+            </div>
+        </div>
+    </div>
 
     <script src="/static/app.js"></script>
 </body>
