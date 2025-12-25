@@ -31,6 +31,20 @@ let availableLayers = [];  // All available layers
 let neuronpediaLayers = []; // Layers that have Neuronpedia data
 let layerDataCache = {};   // Cache for lazy-loaded layer data
 
+// Compare mode state
+let comparePromptA = '';
+let comparePromptB = '';
+let compareLayerDataCache = {};  // Cache for compare layer data
+
+// Refusal mode state
+let refusalCacheKey = null;
+let refusalLayerDataCache = {};
+
+// Batch ranking mode state
+let rankingCacheKey = null;
+let rankingLayerDataCache = {};
+let rankingMode = 'pairs';  // 'pairs' or 'single'
+
 // Steering Queue State
 let steeringQueue = [];   // [{feature_id, layer, coefficient, source_tab}, ...]
 let sidebarOpen = false;
@@ -59,6 +73,7 @@ const settingsModal = document.getElementById('settings-modal');
 const settingsClose = document.getElementById('settings-close');
 const settingsCancel = document.getElementById('settings-cancel');
 const settingsApply = document.getElementById('settings-apply');
+const configBaseModel = document.getElementById('config-base-model');
 const configModelPath = document.getElementById('config-model-path');
 const configSaeRepo = document.getElementById('config-sae-repo');
 const configSaeWidth = document.getElementById('config-sae-width');
@@ -131,6 +146,7 @@ async function fetchConfig() {
         configInfo.textContent = `Layers ${availableLayers.join(', ')} | ${config.sae_width} SAE | ${config.device.toUpperCase()}${npLayersInfo}`;
 
         // Update settings modal fields
+        if (configBaseModel) configBaseModel.value = config.base_model || '4b';
         if (configModelPath) configModelPath.value = config.model_path || '';
         if (configSaeRepo) configSaeRepo.value = config.sae_repo || '';
         if (configSaeWidth) configSaeWidth.value = config.sae_width || '262k';
@@ -141,7 +157,7 @@ async function fetchConfig() {
     }
 }
 
-async function updateConfig(modelPath, saeRepo, saeWidth, saeL0) {
+async function updateConfig(modelPath, saeRepo, saeWidth, saeL0, baseModel) {
     const response = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -150,6 +166,7 @@ async function updateConfig(modelPath, saeRepo, saeWidth, saeL0) {
             sae_repo: saeRepo || undefined,
             sae_width: saeWidth || undefined,
             sae_l0: saeL0 || undefined,
+            base_model: baseModel || undefined,
         })
     });
 
@@ -674,6 +691,25 @@ function toggleNpEmbed() {
     }
 }
 
+// Render Neuronpedia embed for any mode (wrapper function)
+function renderNeuronpediaEmbed(layer, featureId) {
+    // Find the appropriate container based on current mode
+    const mode = document.querySelector('.mode-btn.active')?.dataset.mode || 'analyze';
+    let containerId = 'feature-details';  // Default for analyze mode
+
+    if (mode === 'compare') {
+        containerId = 'diff-feature-detail';
+    } else if (mode === 'refusal') {
+        containerId = 'refusal-feature-detail';
+    } else if (mode === 'batch') {
+        containerId = 'ranking-feature-detail';
+    }
+
+    // Build the Neuronpedia URL
+    const npUrl = `https://www.neuronpedia.org/gemma-3-4b-it/${layer}-gemmascope-res-262k/${featureId}`;
+    renderModeFeatureDetail(containerId, featureId, layer, npUrl);
+}
+
 // Render feature detail with Neuronpedia embed for Compare/Refusal/Batch modes
 function renderModeFeatureDetail(containerId, featureId, layer, npUrl) {
     const container = document.getElementById(containerId);
@@ -986,12 +1022,12 @@ function switchMode(mode) {
     setStatus(`Switched to ${mode} mode`);
 }
 
-// API: Compare prompts
-async function comparePromptsAPI(promptA, promptB, topK = 50) {
+// API: Compare prompts (lazy mode returns just tokens and available layers)
+async function comparePromptsAPI(promptA, promptB, topK = 50, lazy = false) {
     const response = await fetch('/api/compare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt_a: promptA, prompt_b: promptB, top_k: topK })
+        body: JSON.stringify({ prompt_a: promptA, prompt_b: promptB, top_k: topK, lazy })
     });
     if (!response.ok) {
         const error = await response.json();
@@ -1000,12 +1036,26 @@ async function comparePromptsAPI(promptA, promptB, topK = 50) {
     return response.json();
 }
 
-// API: Detect refusal
-async function detectRefusalAPI(prompt, maxTokens = 100) {
+// API: Compare prompts for a single layer
+async function compareLayerAPI(promptA, promptB, layer, topK = 50) {
+    const response = await fetch('/api/compare/layer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt_a: promptA, prompt_b: promptB, layer, top_k: topK })
+    });
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Layer comparison failed');
+    }
+    return response.json();
+}
+
+// API: Detect refusal (lazy mode returns just detection info and available layers)
+async function detectRefusalAPI(prompt, maxTokens = 100, lazy = false) {
     const response = await fetch('/api/detect-refusal', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, max_tokens: maxTokens })
+        body: JSON.stringify({ prompt, max_tokens: maxTokens, lazy })
     });
     if (!response.ok) {
         const error = await response.json();
@@ -1014,12 +1064,26 @@ async function detectRefusalAPI(prompt, maxTokens = 100) {
     return response.json();
 }
 
-// API: Rank features
-async function rankFeaturesAPI(pairs, topK = 100) {
+// API: Detect refusal for a single layer
+async function detectRefusalLayerAPI(cacheKey, layer) {
+    const response = await fetch('/api/detect-refusal/layer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cache_key: cacheKey, layer })
+    });
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Layer refusal analysis failed');
+    }
+    return response.json();
+}
+
+// API: Rank features (lazy mode caches residuals but doesn't analyze layers)
+async function rankFeaturesAPI(pairs, topK = 100, lazy = false) {
     const response = await fetch('/api/rank-features', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt_pairs: pairs, top_k: topK })
+        body: JSON.stringify({ prompt_pairs: pairs, top_k: topK, lazy })
     });
     if (!response.ok) {
         const error = await response.json();
@@ -1028,15 +1092,29 @@ async function rankFeaturesAPI(pairs, topK = 100) {
     return response.json();
 }
 
-async function rankFeaturesSingleAPI(prompts, category, topK = 100) {
+async function rankFeaturesSingleAPI(prompts, category, topK = 100, lazy = false) {
     const response = await fetch('/api/rank-features-single', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompts, category, top_k: topK })
+        body: JSON.stringify({ prompts, category, top_k: topK, lazy })
     });
     if (!response.ok) {
         const error = await response.json();
         throw new Error(error.error || 'Ranking failed');
+    }
+    return response.json();
+}
+
+// API: Rank features for a single layer
+async function rankFeaturesLayerAPI(cacheKey, layer, topK = 100) {
+    const response = await fetch('/api/rank-features/layer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cache_key: cacheKey, layer, top_k: topK })
+    });
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Layer ranking failed');
     }
     return response.json();
 }
@@ -1421,24 +1499,32 @@ document.getElementById('compare-btn').addEventListener('click', async () => {
 
     const compareBtn = document.getElementById('compare-btn');
     setLoading(compareBtn, true);
-    setStatus('Comparing prompts...');
+    setStatus('Tokenizing prompts and caching activations...');
 
     try {
-        comparisonResult = await comparePromptsAPI(promptA, promptB);
+        // Store prompts for later layer loading
+        comparePromptA = promptA;
+        comparePromptB = promptB;
+        compareLayerDataCache = {};  // Clear previous cache
+
+        // Step 1: Lazy load - just tokenize and cache residuals
+        comparisonResult = await comparePromptsAPI(promptA, promptB, 50, true);
 
         const layers = comparisonResult.available_layers;
         const firstLayer = layers[0];
 
-        renderLayerTabs('diff-layer-tabs', layers, firstLayer, (layer) => {
-            renderComparisonResults(comparisonResult, layer);
+        // Render layer tabs with on-demand loading
+        renderLayerTabs('diff-layer-tabs', layers, firstLayer, async (layer) => {
+            await loadCompareLayer(layer);
         });
 
-        renderComparisonResults(comparisonResult, firstLayer);
+        // Step 2: Load first layer
+        await loadCompareLayer(firstLayer);
 
         document.getElementById('export-compare-json').disabled = false;
         document.getElementById('export-compare-csv').disabled = false;
 
-        setStatus(`Comparison complete - found differential features across ${layers.length} layers`);
+        setStatus(`Comparison ready - select layers to analyze`);
     } catch (error) {
         setStatus(`Error: ${error.message}`);
         document.getElementById('diff-results').innerHTML =
@@ -1447,6 +1533,160 @@ document.getElementById('compare-btn').addEventListener('click', async () => {
         setLoading(compareBtn, false);
     }
 });
+
+// Load comparison data for a single layer
+async function loadCompareLayer(layer) {
+    const cacheKey = `${comparePromptA}_${comparePromptB}_${layer}`;
+
+    // Check cache first
+    if (compareLayerDataCache[cacheKey]) {
+        renderComparisonLayerResults(compareLayerDataCache[cacheKey], layer);
+        setStatus(`Showing layer ${layer} comparison results (cached)`);
+        return;
+    }
+
+    // Update layer tab to show loading state
+    const layerBtn = document.querySelector(`#diff-layer-tabs .layer-btn[data-layer="${layer}"]`);
+    if (layerBtn) {
+        layerBtn.classList.add('loading');
+    }
+
+    setStatus(`Loading SAE for layer ${layer}...`);
+
+    try {
+        const layerData = await compareLayerAPI(comparePromptA, comparePromptB, layer, 50);
+        compareLayerDataCache[cacheKey] = layerData;
+
+        // Update the comparisonResult with layer data for export compatibility
+        if (!comparisonResult.layers) {
+            comparisonResult.layers = {};
+        }
+        comparisonResult.layers[layer] = {
+            differential_features: layerData.differential_features,
+            token_activations_a: layerData.token_activations_a,
+            token_activations_b: layerData.token_activations_b
+        };
+
+        renderComparisonLayerResults(layerData, layer);
+        setStatus(`Layer ${layer} comparison complete - found ${layerData.differential_features.length} differential features`);
+    } catch (error) {
+        setStatus(`Error loading layer ${layer}: ${error.message}`);
+    } finally {
+        if (layerBtn) {
+            layerBtn.classList.remove('loading');
+            layerBtn.classList.add('loaded');
+        }
+    }
+}
+
+// Render comparison results for a single layer
+function renderComparisonLayerResults(layerData, layer) {
+    const diffResults = document.getElementById('diff-results');
+    const features = layerData.differential_features;
+    const tokensA = layerData.tokens_a;
+    const tokensB = layerData.tokens_b;
+
+    if (features.length === 0) {
+        diffResults.innerHTML = '<span class="placeholder">No differential features found</span>';
+        return;
+    }
+
+    // Build HTML for differential features
+    let html = '';
+    features.forEach((feat, idx) => {
+        const isPositive = feat.mean_diff > 0;
+        const barColor = isPositive ? 'var(--accent-red)' : 'var(--accent-green)';
+        const barWidthA = Math.min(Math.abs(feat.activation_a) * 50, 100);
+        const barWidthB = Math.min(Math.abs(feat.activation_b) * 50, 100);
+
+        html += `
+            <div class="diff-feature" data-feature="${feat.feature_id}" data-layer="${layer}">
+                <div class="diff-feature-header">
+                    <span class="feature-id">#${feat.feature_id}</span>
+                    <span class="diff-value ${isPositive ? 'positive' : 'negative'}">
+                        ${isPositive ? '+' : ''}${feat.mean_diff.toFixed(3)}
+                    </span>
+                    <button class="add-to-queue-btn" onclick="addToSteeringQueue(${feat.feature_id}, ${layer}, 'compare')">+</button>
+                </div>
+                <div class="diff-bars">
+                    <div class="diff-bar-row">
+                        <span class="bar-label">A:</span>
+                        <div class="bar-container">
+                            <div class="bar" style="width: ${barWidthA}%; background: var(--accent-red);"></div>
+                        </div>
+                        <span class="bar-value">${feat.activation_a.toFixed(3)}</span>
+                    </div>
+                    <div class="diff-bar-row">
+                        <span class="bar-label">B:</span>
+                        <div class="bar-container">
+                            <div class="bar" style="width: ${barWidthB}%; background: var(--accent-green);"></div>
+                        </div>
+                        <span class="bar-value">${feat.activation_b.toFixed(3)}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+
+    diffResults.innerHTML = html;
+
+    // Add click handlers for feature selection
+    diffResults.querySelectorAll('.diff-feature').forEach(el => {
+        el.addEventListener('click', (e) => {
+            if (e.target.classList.contains('add-to-queue-btn')) return;
+            const featureId = parseInt(el.dataset.feature);
+            const featureLayer = parseInt(el.dataset.layer);
+            selectCompareFeature(featureId, featureLayer, layerData);
+        });
+    });
+
+    // Auto-select first feature
+    if (features.length > 0) {
+        selectCompareFeature(features[0].feature_id, layer, layerData);
+    }
+}
+
+// Select a feature in compare mode and show token activations
+function selectCompareFeature(featureId, layer, layerData) {
+    const tokensA = layerData.tokens_a;
+    const tokensB = layerData.tokens_b;
+    const tokenActsA = layerData.token_activations_a[featureId] || [];
+    const tokenActsB = layerData.token_activations_b[featureId] || [];
+
+    // Update selected state
+    document.querySelectorAll('#diff-results .diff-feature').forEach(el => {
+        el.classList.toggle('selected', parseInt(el.dataset.feature) === featureId);
+    });
+
+    // Render token activations for both prompts
+    const compTokensA = document.getElementById('compare-tokens-a');
+    const compTokensB = document.getElementById('compare-tokens-b');
+
+    if (compTokensA) {
+        compTokensA.innerHTML = renderCompareTokens(tokensA, tokenActsA);
+    }
+    if (compTokensB) {
+        compTokensB.innerHTML = renderCompareTokens(tokensB, tokenActsB);
+    }
+
+    // Update Neuronpedia embed
+    selectedLayer = layer;
+    selectedFeatureId = featureId;
+    renderNeuronpediaEmbed(layer, featureId);
+}
+
+function renderCompareTokens(tokens, activations) {
+    if (!tokens || tokens.length === 0) return '<span class="placeholder">No tokens</span>';
+
+    const maxAct = Math.max(...activations.map(Math.abs), 0.01);
+
+    return tokens.map((token, idx) => {
+        const act = activations[idx] || 0;
+        const intensity = Math.min(Math.abs(act) / maxAct, 1);
+        const color = act > 0 ? `rgba(255, 100, 100, ${intensity * 0.7})` : `rgba(100, 100, 255, ${intensity * 0.7})`;
+        return `<span class="token" style="background: ${color};" title="${act.toFixed(4)}">${escapeHtml(token)}</span>`;
+    }).join('');
+}
 
 // Refusal form
 document.getElementById('refusal-form').addEventListener('submit', async (e) => {
@@ -1462,19 +1702,40 @@ document.getElementById('refusal-form').addEventListener('submit', async (e) => 
 
     const refusalBtn = document.getElementById('refusal-btn');
     setLoading(refusalBtn, true);
-    setStatus('Generating and detecting refusal...');
+    setStatus('Generating response...');
 
     try {
-        refusalResult = await detectRefusalAPI(prompt, maxTokens);
+        // Clear previous cache
+        refusalLayerDataCache = {};
+
+        // Step 1: Lazy load - generate text and cache residuals without analyzing layers
+        refusalResult = await detectRefusalAPI(prompt, maxTokens, true);
+        refusalCacheKey = refusalResult.cache_key;
+
+        // Show generation result immediately
+        const refusalResponse = document.getElementById('refusal-response');
+        if (refusalResponse) {
+            const statusClass = refusalResult.refusal_detected ? 'refusal-detected' : 'refusal-clear';
+            refusalResponse.innerHTML = `
+                <div class="refusal-status ${statusClass}">
+                    ${refusalResult.refusal_detected
+                        ? `Refusal detected: ${refusalResult.refusal_phrases_found.join(', ')}`
+                        : 'No refusal phrases detected'}
+                </div>
+                <div class="generated-text">${escapeHtml(refusalResult.generated_text)}</div>
+            `;
+        }
 
         const layers = refusalResult.available_layers;
         const firstLayer = layers[0];
 
-        renderLayerTabs('refusal-layer-tabs', layers, firstLayer, (layer) => {
-            renderRefusalResults(refusalResult, layer);
+        // Render layer tabs with on-demand loading
+        renderLayerTabs('refusal-layer-tabs', layers, firstLayer, async (layer) => {
+            await loadRefusalLayer(layer);
         });
 
-        renderRefusalResults(refusalResult, firstLayer);
+        // Step 2: Load first layer
+        await loadRefusalLayer(firstLayer);
 
         const status = refusalResult.refusal_detected
             ? `Refusal detected: ${refusalResult.refusal_phrases_found.join(', ')}`
@@ -1489,9 +1750,115 @@ document.getElementById('refusal-form').addEventListener('submit', async (e) => 
     }
 });
 
+// Load refusal analysis for a single layer
+async function loadRefusalLayer(layer) {
+    const cacheKey = `${refusalCacheKey}_${layer}`;
+
+    // Check cache first
+    if (refusalLayerDataCache[cacheKey]) {
+        renderRefusalLayerResults(refusalLayerDataCache[cacheKey], layer);
+        setStatus(`Showing layer ${layer} refusal analysis (cached)`);
+        return;
+    }
+
+    // Update layer tab to show loading state
+    const layerBtn = document.querySelector(`#refusal-layer-tabs .layer-btn[data-layer="${layer}"]`);
+    if (layerBtn) {
+        layerBtn.classList.add('loading');
+    }
+
+    setStatus(`Loading SAE for layer ${layer}...`);
+
+    try {
+        const layerData = await detectRefusalLayerAPI(refusalCacheKey, layer);
+        refusalLayerDataCache[cacheKey] = layerData;
+
+        // Update the refusalResult with layer data for compatibility
+        if (!refusalResult.layers) {
+            refusalResult.layers = {};
+        }
+        refusalResult.layers[layer] = layerData;
+
+        renderRefusalLayerResults(layerData, layer);
+        setStatus(`Layer ${layer} refusal analysis complete`);
+    } catch (error) {
+        setStatus(`Error loading layer ${layer}: ${error.message}`);
+    } finally {
+        if (layerBtn) {
+            layerBtn.classList.remove('loading');
+            layerBtn.classList.add('loaded');
+        }
+    }
+}
+
+// Render refusal analysis results for a single layer
+function renderRefusalLayerResults(layerData, layer) {
+    const refusalFeatures = document.getElementById('refusal-features');
+    const features = layerData.refusal_correlated_features || [];
+
+    if (features.length === 0) {
+        if (refusalFeatures) {
+            refusalFeatures.innerHTML = '<span class="placeholder">No correlated features found</span>';
+        }
+        return;
+    }
+
+    let html = `<div class="refusal-features-list">`;
+    features.forEach(feat => {
+        html += `
+            <div class="refusal-feature" data-feature="${feat.feature_id}" data-layer="${layer}">
+                <div class="feature-header">
+                    <span class="feature-id">#${feat.feature_id}</span>
+                    <span class="correlation-score">r=${feat.correlation_score.toFixed(3)}</span>
+                    <button class="add-to-queue-btn" onclick="addToSteeringQueue(${feat.feature_id}, ${layer}, 'refusal')">+</button>
+                </div>
+                <div class="feature-stats">
+                    Mean activation: ${feat.mean_activation.toFixed(3)}
+                </div>
+            </div>
+        `;
+    });
+    html += `</div>`;
+
+    if (refusalFeatures) {
+        refusalFeatures.innerHTML = html;
+
+        // Add click handlers for feature selection
+        refusalFeatures.querySelectorAll('.refusal-feature').forEach(el => {
+            el.addEventListener('click', (e) => {
+                if (e.target.classList.contains('add-to-queue-btn')) return;
+                const featureId = parseInt(el.dataset.feature);
+                const featureLayer = parseInt(el.dataset.layer);
+                selectRefusalFeature(featureId, featureLayer);
+            });
+        });
+
+        // Auto-select first feature
+        if (features.length > 0) {
+            selectRefusalFeature(features[0].feature_id, layer);
+        }
+    }
+}
+
+// Select a feature in refusal mode
+function selectRefusalFeature(featureId, layer) {
+    // Update selected state
+    document.querySelectorAll('#refusal-features .refusal-feature').forEach(el => {
+        el.classList.toggle('selected', parseInt(el.dataset.feature) === featureId);
+    });
+
+    // Update Neuronpedia embed
+    selectedLayer = layer;
+    selectedFeatureId = featureId;
+    renderNeuronpediaEmbed(layer, featureId);
+}
+
 // Rank button
 document.getElementById('rank-btn').addEventListener('click', async () => {
     const rankBtn = document.getElementById('rank-btn');
+
+    // Clear previous cache
+    rankingLayerDataCache = {};
 
     // Check if we're in single-category mode
     if (singleCategoryMode) {
@@ -1503,24 +1870,29 @@ document.getElementById('rank-btn').addEventListener('click', async () => {
         }
 
         setLoading(rankBtn, true);
-        setStatus(`Ranking features across ${prompts.length} ${singleCategoryType} prompts...`);
+        setStatus(`Caching activations for ${prompts.length} ${singleCategoryType} prompts...`);
+        rankingMode = 'single';
 
         try {
-            rankingResult = await rankFeaturesSingleAPI(prompts, singleCategoryType);
+            // Step 1: Lazy load - cache residuals without analyzing layers
+            rankingResult = await rankFeaturesSingleAPI(prompts, singleCategoryType, 100, true);
+            rankingCacheKey = rankingResult.cache_key;
 
             const layers = rankingResult.available_layers;
             const firstLayer = layers[0];
 
-            renderLayerTabs('ranking-layer-tabs', layers, firstLayer, (layer) => {
-                renderRankingResults(rankingResult, layer);
+            // Render layer tabs with on-demand loading
+            renderLayerTabs('ranking-layer-tabs', layers, firstLayer, async (layer) => {
+                await loadRankingLayer(layer);
             });
 
-            renderRankingResults(rankingResult, firstLayer);
+            // Step 2: Load first layer
+            await loadRankingLayer(firstLayer);
 
             document.getElementById('export-rank-json').disabled = false;
             document.getElementById('export-rank-csv').disabled = false;
 
-            setStatus(`Ranking complete - analyzed ${prompts.length} ${singleCategoryType} prompts`);
+            setStatus(`Ranking ready - select layers to analyze`);
         } catch (error) {
             setStatus(`Error: ${error.message}`);
             document.getElementById('ranking-results').innerHTML =
@@ -1540,24 +1912,29 @@ document.getElementById('rank-btn').addEventListener('click', async () => {
     }
 
     setLoading(rankBtn, true);
-    setStatus(`Ranking features across ${pairs.length} prompt pairs...`);
+    setStatus(`Caching activations for ${pairs.length} prompt pairs...`);
+    rankingMode = 'pairs';
 
     try {
-        rankingResult = await rankFeaturesAPI(pairs);
+        // Step 1: Lazy load - cache residuals without analyzing layers
+        rankingResult = await rankFeaturesAPI(pairs, 100, true);
+        rankingCacheKey = rankingResult.cache_key;
 
         const layers = rankingResult.available_layers;
         const firstLayer = layers[0];
 
-        renderLayerTabs('ranking-layer-tabs', layers, firstLayer, (layer) => {
-            renderRankingResults(rankingResult, layer);
+        // Render layer tabs with on-demand loading
+        renderLayerTabs('ranking-layer-tabs', layers, firstLayer, async (layer) => {
+            await loadRankingLayer(layer);
         });
 
-        renderRankingResults(rankingResult, firstLayer);
+        // Step 2: Load first layer
+        await loadRankingLayer(firstLayer);
 
         document.getElementById('export-rank-json').disabled = false;
         document.getElementById('export-rank-csv').disabled = false;
 
-        setStatus(`Ranking complete - analyzed ${pairs.length} prompt pairs`);
+        setStatus(`Ranking ready - select layers to analyze`);
     } catch (error) {
         setStatus(`Error: ${error.message}`);
         document.getElementById('ranking-results').innerHTML =
@@ -1566,6 +1943,149 @@ document.getElementById('rank-btn').addEventListener('click', async () => {
         setLoading(rankBtn, false);
     }
 });
+
+// Load ranking analysis for a single layer
+async function loadRankingLayer(layer) {
+    const cacheKey = `${rankingCacheKey}_${layer}`;
+
+    // Check cache first
+    if (rankingLayerDataCache[cacheKey]) {
+        renderRankingLayerResults(rankingLayerDataCache[cacheKey], layer);
+        setStatus(`Showing layer ${layer} ranking results (cached)`);
+        return;
+    }
+
+    // Update layer tab to show loading state
+    const layerBtn = document.querySelector(`#ranking-layer-tabs .layer-btn[data-layer="${layer}"]`);
+    if (layerBtn) {
+        layerBtn.classList.add('loading');
+    }
+
+    setStatus(`Loading SAE for layer ${layer}...`);
+
+    try {
+        const layerData = await rankFeaturesLayerAPI(rankingCacheKey, layer, 100);
+        rankingLayerDataCache[cacheKey] = layerData;
+
+        // Update the rankingResult with layer data for export compatibility
+        if (!rankingResult.layers) {
+            rankingResult.layers = {};
+        }
+        rankingResult.layers[layer] = layerData;
+
+        renderRankingLayerResults(layerData, layer);
+        setStatus(`Layer ${layer} ranking complete - found ${layerData.ranked_features.length} features`);
+    } catch (error) {
+        setStatus(`Error loading layer ${layer}: ${error.message}`);
+    } finally {
+        if (layerBtn) {
+            layerBtn.classList.remove('loading');
+            layerBtn.classList.add('loaded');
+        }
+    }
+}
+
+// Render ranking results for a single layer
+function renderRankingLayerResults(layerData, layer) {
+    const rankingResults = document.getElementById('ranking-results');
+    const features = layerData.ranked_features || [];
+
+    if (features.length === 0) {
+        if (rankingResults) {
+            rankingResults.innerHTML = '<span class="placeholder">No ranked features found</span>';
+        }
+        return;
+    }
+
+    // Build HTML for ranked features
+    let html = '<div class="ranking-table"><table>';
+
+    if (rankingMode === 'pairs') {
+        html += `
+            <thead>
+                <tr>
+                    <th>Rank</th>
+                    <th>Feature</th>
+                    <th>Consistency</th>
+                    <th>Harmful Avg</th>
+                    <th>Benign Avg</th>
+                    <th>Diff Score</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+        `;
+        features.forEach((feat, idx) => {
+            html += `
+                <tr class="ranking-row" data-feature="${feat.feature_id}" data-layer="${layer}">
+                    <td>${idx + 1}</td>
+                    <td class="feature-id">#${feat.feature_id}</td>
+                    <td>${(feat.consistency_score * 100).toFixed(1)}%</td>
+                    <td>${feat.mean_harmful_activation.toFixed(3)}</td>
+                    <td>${feat.mean_benign_activation.toFixed(3)}</td>
+                    <td>${feat.differential_score.toFixed(4)}</td>
+                    <td><button class="add-to-queue-btn" onclick="addToSteeringQueue(${feat.feature_id}, ${layer}, 'batch')">+</button></td>
+                </tr>
+            `;
+        });
+    } else {
+        html += `
+            <thead>
+                <tr>
+                    <th>Rank</th>
+                    <th>Feature</th>
+                    <th>Mean Activation</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+        `;
+        features.forEach((feat, idx) => {
+            html += `
+                <tr class="ranking-row" data-feature="${feat.feature_id}" data-layer="${layer}">
+                    <td>${idx + 1}</td>
+                    <td class="feature-id">#${feat.feature_id}</td>
+                    <td>${feat.mean_activation.toFixed(3)}</td>
+                    <td><button class="add-to-queue-btn" onclick="addToSteeringQueue(${feat.feature_id}, ${layer}, 'batch')">+</button></td>
+                </tr>
+            `;
+        });
+    }
+
+    html += '</tbody></table></div>';
+
+    if (rankingResults) {
+        rankingResults.innerHTML = html;
+
+        // Add click handlers for feature selection
+        rankingResults.querySelectorAll('.ranking-row').forEach(el => {
+            el.addEventListener('click', (e) => {
+                if (e.target.classList.contains('add-to-queue-btn')) return;
+                const featureId = parseInt(el.dataset.feature);
+                const featureLayer = parseInt(el.dataset.layer);
+                selectRankingFeature(featureId, featureLayer);
+            });
+        });
+
+        // Auto-select first feature
+        if (features.length > 0) {
+            selectRankingFeature(features[0].feature_id, layer);
+        }
+    }
+}
+
+// Select a feature in ranking mode
+function selectRankingFeature(featureId, layer) {
+    // Update selected state
+    document.querySelectorAll('#ranking-results .ranking-row').forEach(el => {
+        el.classList.toggle('selected', parseInt(el.dataset.feature) === featureId);
+    });
+
+    // Update Neuronpedia embed
+    selectedLayer = layer;
+    selectedFeatureId = featureId;
+    renderNeuronpediaEmbed(layer, featureId);
+}
 
 // Add pair/prompt button - handles both modes
 document.getElementById('add-pair-btn').addEventListener('click', () => {
@@ -2092,6 +2612,7 @@ function closeSettingsModal() {
 async function applySettings() {
     if (!settingsApply) return;
 
+    const baseModel = configBaseModel?.value;
     const modelPath = configModelPath?.value?.trim();
     const saeRepo = configSaeRepo?.value?.trim();
     const saeWidth = configSaeWidth?.value;
@@ -2099,6 +2620,7 @@ async function applySettings() {
 
     // Check if anything changed
     const hasChanges =
+        (baseModel && baseModel !== currentConfig?.base_model) ||
         (modelPath && modelPath !== currentConfig?.model_path) ||
         (saeRepo && saeRepo !== currentConfig?.sae_repo) ||
         (saeWidth && saeWidth !== currentConfig?.sae_width) ||
@@ -2113,7 +2635,7 @@ async function applySettings() {
     setStatus('Updating configuration...');
 
     try {
-        const result = await updateConfig(modelPath, saeRepo, saeWidth, saeL0);
+        const result = await updateConfig(modelPath, saeRepo, saeWidth, saeL0, baseModel);
 
         if (result.success) {
             // Clear caches since model changed

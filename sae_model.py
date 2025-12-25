@@ -45,6 +45,7 @@ MODEL_PATH = "D:\\models\\gemma-3-4b-it"
 SAE_REPO = "google/gemma-scope-2-4b-it"
 SAE_WIDTH = "262k"
 SAE_L0 = "small"
+BASE_MODEL = "4b"  # Explicit base model selection: "4b" or "12b"
 
 # Available SAE layers per model
 SAE_LAYERS_BY_MODEL = {
@@ -58,28 +59,24 @@ NEURONPEDIA_LAYERS_BY_MODEL = {
     "12b": [12],
 }
 
-# Auto-detect model size from repo name
-def get_available_layers(repo: str) -> list[int]:
-    """Get available SAE layers based on repo name."""
-    if "12b" in repo.lower():
-        return SAE_LAYERS_BY_MODEL["12b"]
-    elif "4b" in repo.lower():
-        return SAE_LAYERS_BY_MODEL["4b"]
-    # Default to 12b layers
-    return SAE_LAYERS_BY_MODEL["12b"]
+
+def get_available_layers(base_model: str) -> list[int]:
+    """Get available SAE layers based on explicit base model selection."""
+    if base_model in SAE_LAYERS_BY_MODEL:
+        return SAE_LAYERS_BY_MODEL[base_model]
+    # Default to 4b layers
+    return SAE_LAYERS_BY_MODEL["4b"]
 
 
-def get_neuronpedia_layers(repo: str) -> list[int]:
-    """Get layers that have Neuronpedia data available."""
-    if "12b" in repo.lower():
-        return NEURONPEDIA_LAYERS_BY_MODEL["12b"]
-    elif "4b" in repo.lower():
-        return NEURONPEDIA_LAYERS_BY_MODEL["4b"]
-    return NEURONPEDIA_LAYERS_BY_MODEL["12b"]
+def get_neuronpedia_layers(base_model: str) -> list[int]:
+    """Get layers that have Neuronpedia data available based on base model."""
+    if base_model in NEURONPEDIA_LAYERS_BY_MODEL:
+        return NEURONPEDIA_LAYERS_BY_MODEL[base_model]
+    return NEURONPEDIA_LAYERS_BY_MODEL["4b"]
 
 
-SAE_LAYERS = get_available_layers(SAE_REPO)
-NEURONPEDIA_LAYERS = get_neuronpedia_layers(SAE_REPO)
+SAE_LAYERS = get_available_layers(BASE_MODEL)
+NEURONPEDIA_LAYERS = get_neuronpedia_layers(BASE_MODEL)
 
 
 # =============================================================================
@@ -137,11 +134,13 @@ class SAEModelManager:
         sae_layers: list[int] = None,
         sae_width: str = SAE_WIDTH,
         sae_l0: str = SAE_L0,
+        base_model: str = BASE_MODEL,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         self.model_path = model_path
         self.sae_repo = sae_repo
-        self.sae_layers = sae_layers if sae_layers is not None else get_available_layers(sae_repo)
+        self.base_model = base_model
+        self.sae_layers = sae_layers if sae_layers is not None else get_available_layers(base_model)
         self.sae_width = sae_width
         self.sae_l0 = sae_l0
         self.device = device
@@ -194,6 +193,7 @@ class SAEModelManager:
         sae_repo: str = None,
         sae_width: str = None,
         sae_l0: str = None,
+        base_model: str = None,
     ) -> dict:
         """
         Reconfigure the manager with new settings.
@@ -203,6 +203,7 @@ class SAEModelManager:
             sae_repo: New SAE repository
             sae_width: New SAE width (16k, 65k, 262k, 1M)
             sae_l0: New SAE L0 (small, medium, large)
+            base_model: Base model size ("4b" or "12b") - controls SAE layers
 
         Returns:
             Dictionary with new configuration
@@ -215,11 +216,14 @@ class SAEModelManager:
             self.model_path = model_path
         if sae_repo is not None:
             self.sae_repo = sae_repo
-            self.sae_layers = get_available_layers(sae_repo)
         if sae_width is not None:
             self.sae_width = sae_width
         if sae_l0 is not None:
             self.sae_l0 = sae_l0
+        if base_model is not None:
+            self.base_model = base_model
+            # Update layers based on new base model
+            self.sae_layers = get_available_layers(base_model)
 
         return {
             "model_path": self.model_path,
@@ -227,8 +231,9 @@ class SAEModelManager:
             "sae_layers": self.sae_layers,
             "sae_width": self.sae_width,
             "sae_l0": self.sae_l0,
+            "base_model": self.base_model,
             "device": self.device,
-            "neuronpedia_layers": get_neuronpedia_layers(self.sae_repo),
+            "neuronpedia_layers": get_neuronpedia_layers(self.base_model),
         }
 
     def apply_steering_to_weights(
@@ -432,10 +437,40 @@ class SAEModelManager:
             _ = self.model
         return self._layers
 
+    def _ensure_sae_downloaded(self, layer: int) -> str:
+        """
+        Ensure SAE weights are downloaded for a layer (without loading into memory).
+
+        Returns:
+            Path to the downloaded safetensors file
+        """
+        print(f"  Downloading SAE for layer {layer} to disk (not loading into GPU)...")
+        path = hf_hub_download(
+            repo_id=self.sae_repo,
+            filename=f"resid_post/layer_{layer}_width_{self.sae_width}_l0_{self.sae_l0}/params.safetensors",
+        )
+        return path
+
+    def _ensure_all_saes_downloaded(self):
+        """
+        Ensure all SAE weights are downloaded before loading the LLM.
+
+        This prevents the scenario where the LLM is loaded into memory
+        but SAE download fails, wasting GPU memory.
+        """
+        print(f"Pre-downloading SAE files for layers {self.sae_layers} (disk only, not GPU)...")
+        for layer in self.sae_layers:
+            self._ensure_sae_downloaded(layer)
+        print("All SAE files downloaded to disk. SAEs will be loaded into GPU on-demand.")
+
     @property
     def model(self):
-        """Lazy load the Gemma model."""
+        """Lazy load the Gemma model (after ensuring SAEs are downloaded)."""
         if self._model is None:
+            # Download SAE weights BEFORE loading LLM to avoid wasting memory
+            # if SAE download fails
+            self._ensure_all_saes_downloaded()
+
             print(f"Loading model from {self.model_path}...")
             self._model = AutoModelForCausalLM.from_pretrained(
                 self.model_path,
@@ -475,8 +510,19 @@ class SAEModelManager:
             self._saes[layer] = self._load_sae(layer)
         return self._saes[layer]
 
+    def unload_sae(self, layer: int):
+        """Unload SAE for a specific layer to free memory."""
+        if layer in self._saes:
+            del self._saes[layer]
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print(f"Unloaded SAE for layer {layer}")
+
     def _load_sae(self, layer: int) -> JumpReLUSAE:
         """Download and load SAE weights from HuggingFace for a specific layer."""
+        print(f"Loading SAE for layer {layer} into GPU memory...")
         path_to_params = hf_hub_download(
             repo_id=self.sae_repo,
             filename=f"resid_post/layer_{layer}_width_{self.sae_width}_l0_{self.sae_l0}/params.safetensors",
@@ -489,6 +535,7 @@ class SAEModelManager:
         sae.to(self.device)
         sae.eval()
 
+        print(f"  Layer {layer} SAE loaded ({d_sae:,} features, {d_model} d_model)")
         return sae
 
     def _gather_acts_hook(self, mod, inputs, outputs, cache: dict, key: str):
@@ -651,7 +698,7 @@ class SAEModelManager:
             }
         }
 
-    def analyze_layer(self, prompt: str, layer: int, top_k: int = 10) -> dict:
+    def analyze_layer(self, prompt: str, layer: int, top_k: int = 10, unload_others: bool = True) -> dict:
         """
         Analyze a specific layer for a prompt. Loads SAE weights on-demand.
         Uses cached residual activations if available.
@@ -660,12 +707,19 @@ class SAEModelManager:
             prompt: The text prompt to analyze
             layer: The SAE layer index to analyze
             top_k: Number of top features to return per token
+            unload_others: If True, unload other SAEs to save memory (default True)
 
         Returns:
             Dictionary with SAE activation data for this layer
         """
         if layer not in self.sae_layers:
             raise ValueError(f"Layer {layer} not in available layers: {self.sae_layers}")
+
+        # Unload other SAEs to prevent memory accumulation
+        if unload_others:
+            layers_to_unload = [l for l in list(self._saes.keys()) if l != layer]
+            for l in layers_to_unload:
+                self.unload_sae(l)
 
         cache_key = hash(prompt)
 
@@ -739,7 +793,7 @@ class SAEModelManager:
         global _residual_cache
         _residual_cache.clear()
 
-    def get_feature_activations(self, prompt: str, feature_id: int, layer: int = None) -> dict:
+    def get_feature_activations(self, prompt: str, feature_id: int, layer: int = None, unload_others: bool = True) -> dict:
         """
         Get activation pattern for a specific feature across all tokens.
 
@@ -747,12 +801,19 @@ class SAEModelManager:
             prompt: The text prompt
             feature_id: The SAE feature index
             layer: The SAE layer (defaults to first available layer)
+            unload_others: If True, unload other SAEs to save memory (default True)
 
         Returns:
             Dictionary with per-token activations for the feature
         """
         if layer is None:
             layer = self.sae_layers[0]
+
+        # Unload other SAEs to prevent memory accumulation
+        if unload_others:
+            layers_to_unload = [l for l in list(self._saes.keys()) if l != layer]
+            for l in layers_to_unload:
+                self.unload_sae(l)
 
         # Tokenize
         inputs = self.tokenizer.encode(
@@ -1058,13 +1119,13 @@ class SAEModelManager:
     # =========================================================================
 
     def get_neuronpedia_model_id(self) -> str:
-        """Get the Neuronpedia model ID based on SAE repo."""
-        # Map SAE repo to Neuronpedia model ID
-        if "12b" in SAE_REPO.lower():
+        """Get the Neuronpedia model ID based on base model."""
+        # Map base model to Neuronpedia model ID
+        if self.base_model == "12b":
             return "gemma-3-12b-it"
-        elif "4b" in SAE_REPO.lower():
+        elif self.base_model == "4b":
             return "gemma-3-4b-it"
-        return "gemma-3-12b-it"  # Default
+        return "gemma-3-4b-it"  # Default
 
     def get_neuronpedia_source_id(self, layer: int) -> str:
         """Get the Neuronpedia source/SAE ID for a layer."""
@@ -1091,7 +1152,7 @@ class SAEModelManager:
 
     def has_neuronpedia_data(self, layer: int) -> bool:
         """Check if Neuronpedia has data for this layer."""
-        return layer in NEURONPEDIA_LAYERS
+        return layer in get_neuronpedia_layers(self.base_model)
 
     def fetch_neuronpedia_data(self, feature_id: int, layer: int) -> dict:
         """
@@ -1104,7 +1165,7 @@ class SAEModelManager:
             return {
                 "error": f"Neuronpedia does not have data for layer {layer}",
                 "unsupported_layer": True,
-                "supported_layers": NEURONPEDIA_LAYERS,
+                "supported_layers": get_neuronpedia_layers(self.base_model),
             }
 
         model_id = self.get_neuronpedia_model_id()
@@ -1307,6 +1368,190 @@ class SAEModelManager:
             "available_layers": self.sae_layers,
         }
 
+    def compare_prompts_lazy(
+        self,
+        prompt_a: str,
+        prompt_b: str,
+    ) -> dict:
+        """
+        Initial comparison that tokenizes both prompts and caches residuals.
+        Does NOT load any SAE weights.
+
+        Returns:
+            Dictionary with tokens for both prompts and available layers
+        """
+        # Tokenize both prompts
+        inputs_a = self.tokenizer.encode(
+            prompt_a, return_tensors="pt", add_special_tokens=True
+        ).to(self.device)
+        inputs_b = self.tokenizer.encode(
+            prompt_b, return_tensors="pt", add_special_tokens=True
+        ).to(self.device)
+
+        tokens_a = self.tokenizer.convert_ids_to_tokens(inputs_a[0].tolist())
+        tokens_b = self.tokenizer.convert_ids_to_tokens(inputs_b[0].tolist())
+        tokens_a = [t.replace("▁", " ").replace("<0x0A>", "\\n") for t in tokens_a]
+        tokens_b = [t.replace("▁", " ").replace("<0x0A>", "\\n") for t in tokens_b]
+
+        # Cache residual activations for both prompts
+        cache_key_a = hash(prompt_a)
+        cache_key_b = hash(prompt_b)
+
+        if cache_key_a not in _residual_cache:
+            residuals_a = self.gather_residual_activations(inputs_a)
+            _residual_cache[cache_key_a] = {
+                "residuals": residuals_a,
+                "tokens": tokens_a,
+                "inputs": inputs_a,
+            }
+
+        if cache_key_b not in _residual_cache:
+            residuals_b = self.gather_residual_activations(inputs_b)
+            _residual_cache[cache_key_b] = {
+                "residuals": residuals_b,
+                "tokens": tokens_b,
+                "inputs": inputs_b,
+            }
+
+        return {
+            "prompt_a": prompt_a,
+            "prompt_b": prompt_b,
+            "tokens_a": tokens_a,
+            "tokens_b": tokens_b,
+            "available_layers": self.sae_layers,
+        }
+
+    def compare_prompts_layer(
+        self,
+        prompt_a: str,
+        prompt_b: str,
+        layer: int,
+        top_k: int = 50,
+        threshold: float = 0.1,
+        unload_others: bool = True
+    ) -> dict:
+        """
+        Compare activations between two prompts for a SINGLE layer.
+        Uses cached residual activations if available.
+
+        Args:
+            prompt_a: First prompt (typically harmful/refused)
+            prompt_b: Second prompt (typically benign/accepted)
+            layer: The SAE layer to analyze
+            top_k: Number of top differential features
+            threshold: Minimum activation to consider
+            unload_others: If True, unload other SAEs to save memory (default True)
+
+        Returns:
+            Dictionary with differential features for this layer
+        """
+        if layer not in self.sae_layers:
+            raise ValueError(f"Layer {layer} not in available layers: {self.sae_layers}")
+
+        # Unload other SAEs to prevent memory accumulation
+        if unload_others:
+            layers_to_unload = [l for l in list(self._saes.keys()) if l != layer]
+            for l in layers_to_unload:
+                self.unload_sae(l)
+
+        cache_key_a = hash(prompt_a)
+        cache_key_b = hash(prompt_b)
+
+        # Get cached residuals or compute them
+        if cache_key_a in _residual_cache:
+            residuals_a = _residual_cache[cache_key_a]["residuals"][layer]
+            tokens_a = _residual_cache[cache_key_a]["tokens"]
+        else:
+            inputs_a = self.tokenizer.encode(
+                prompt_a, return_tensors="pt", add_special_tokens=True
+            ).to(self.device)
+            tokens_a = self.tokenizer.convert_ids_to_tokens(inputs_a[0].tolist())
+            tokens_a = [t.replace("▁", " ").replace("<0x0A>", "\\n") for t in tokens_a]
+            all_residuals_a = self.gather_residual_activations(inputs_a)
+            _residual_cache[cache_key_a] = {
+                "residuals": all_residuals_a,
+                "tokens": tokens_a,
+                "inputs": inputs_a,
+            }
+            residuals_a = all_residuals_a[layer]
+
+        if cache_key_b in _residual_cache:
+            residuals_b = _residual_cache[cache_key_b]["residuals"][layer]
+            tokens_b = _residual_cache[cache_key_b]["tokens"]
+        else:
+            inputs_b = self.tokenizer.encode(
+                prompt_b, return_tensors="pt", add_special_tokens=True
+            ).to(self.device)
+            tokens_b = self.tokenizer.convert_ids_to_tokens(inputs_b[0].tolist())
+            tokens_b = [t.replace("▁", " ").replace("<0x0A>", "\\n") for t in tokens_b]
+            all_residuals_b = self.gather_residual_activations(inputs_b)
+            _residual_cache[cache_key_b] = {
+                "residuals": all_residuals_b,
+                "tokens": tokens_b,
+                "inputs": inputs_b,
+            }
+            residuals_b = all_residuals_b[layer]
+
+        # Load SAE for this layer
+        sae = self.get_sae(layer)
+
+        # Encode with SAE
+        sae_acts_a = sae.encode(residuals_a.to(torch.float32))
+        sae_acts_b = sae.encode(residuals_b.to(torch.float32))
+
+        # Compute mean activations (skip BOS token)
+        mean_acts_a = sae_acts_a[1:].mean(dim=0)
+        mean_acts_b = sae_acts_b[1:].mean(dim=0)
+
+        # Compute differential
+        diff = mean_acts_a - mean_acts_b
+        epsilon = 1e-6
+        ratio = mean_acts_a / (mean_acts_b + epsilon)
+
+        # Get features above threshold in either prompt
+        mask = (mean_acts_a > threshold) | (mean_acts_b > threshold)
+        valid_indices = torch.where(mask)[0]
+
+        differential_features = []
+        token_acts_a = {}
+        token_acts_b = {}
+
+        if len(valid_indices) > 0:
+            # Get differential values for valid features
+            valid_diffs = diff[valid_indices]
+            valid_acts_a = mean_acts_a[valid_indices]
+            valid_acts_b = mean_acts_b[valid_indices]
+            valid_ratios = ratio[valid_indices]
+
+            # Sort by absolute differential (most different first)
+            sorted_indices = torch.argsort(valid_diffs.abs(), descending=True)[:top_k]
+
+            for idx in sorted_indices:
+                feat_idx = valid_indices[idx].item()
+                differential_features.append({
+                    "feature_id": feat_idx,
+                    "mean_diff": round(valid_diffs[idx].item(), 4),
+                    "activation_a": round(valid_acts_a[idx].item(), 4),
+                    "activation_b": round(valid_acts_b[idx].item(), 4),
+                    "ratio": round(valid_ratios[idx].item(), 4),
+                    "neuronpedia_url": self.get_neuronpedia_url(feat_idx, layer),
+                })
+
+            # Store per-token activations for top features
+            top_feature_ids = [f["feature_id"] for f in differential_features]
+            for feat_id in top_feature_ids:
+                token_acts_a[feat_id] = [round(v, 4) for v in sae_acts_a[:, feat_id].tolist()]
+                token_acts_b[feat_id] = [round(v, 4) for v in sae_acts_b[:, feat_id].tolist()]
+
+        return {
+            "layer": layer,
+            "tokens_a": tokens_a,
+            "tokens_b": tokens_b,
+            "differential_features": differential_features,
+            "token_activations_a": token_acts_a,
+            "token_activations_b": token_acts_b,
+        }
+
     # Default refusal phrases to detect
     REFUSAL_PHRASES = [
         "I can't", "I cannot", "I'm sorry", "I apologize",
@@ -1437,6 +1682,170 @@ class SAEModelManager:
             "refusal_token_positions": refusal_positions,
             "layers": layers_data,
             "available_layers": self.sae_layers,
+        }
+
+    def detect_refusal_lazy(
+        self,
+        prompt: str,
+        max_new_tokens: int = 100,
+        refusal_phrases: list[str] = None,
+    ) -> dict:
+        """
+        Generate a response and detect refusal patterns WITHOUT loading SAE.
+        Caches residuals for later layer-by-layer analysis.
+
+        Returns:
+            Dictionary with refusal detection info and available layers
+        """
+        if refusal_phrases is None:
+            refusal_phrases = self.REFUSAL_PHRASES
+
+        # Format prompt for chat
+        messages = [{"role": "user", "content": prompt}]
+        formatted = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+        inputs = self.tokenizer.encode(
+            formatted, return_tensors="pt", add_special_tokens=True
+        ).to(self.device)
+        prompt_len = inputs.shape[1]
+
+        # Generate response
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+            )
+
+        # Decode generated text
+        generated_ids = outputs[0][prompt_len:]
+        generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+        # Detect refusal phrases
+        refusal_detected = False
+        phrases_found = []
+        for phrase in refusal_phrases:
+            if phrase.lower() in generated_text.lower():
+                refusal_detected = True
+                phrases_found.append(phrase)
+
+        # Get token-level info for generated text
+        full_tokens = self.tokenizer.convert_ids_to_tokens(outputs[0].tolist())
+        full_tokens = [t.replace("▁", " ").replace("<0x0A>", "\\n") for t in full_tokens]
+        generated_tokens = full_tokens[prompt_len:]
+
+        # Find token positions of refusal phrases (approximate)
+        refusal_positions = []
+        gen_text_lower = generated_text.lower()
+        for phrase in phrases_found:
+            pos = gen_text_lower.find(phrase.lower())
+            if pos >= 0:
+                char_count = 0
+                for i, tok in enumerate(generated_tokens):
+                    char_count += len(tok)
+                    if char_count >= pos:
+                        refusal_positions.append(prompt_len + i)
+                        break
+
+        # Cache residual activations using a unique key for this generation
+        cache_key = hash(f"refusal_{prompt}_{max_new_tokens}")
+        residuals = self.gather_residual_activations(outputs)
+        _residual_cache[cache_key] = {
+            "residuals": residuals,
+            "tokens": full_tokens,
+            "inputs": outputs,
+            "prompt_len": prompt_len,
+            "refusal_positions": refusal_positions,
+        }
+
+        return {
+            "prompt": prompt,
+            "generated_text": generated_text,
+            "refusal_detected": refusal_detected,
+            "refusal_phrases_found": phrases_found,
+            "generated_tokens": generated_tokens,
+            "refusal_token_positions": refusal_positions,
+            "prompt_len": prompt_len,
+            "available_layers": self.sae_layers,
+            "cache_key": str(cache_key),  # String to avoid JS integer precision loss
+        }
+
+    def detect_refusal_layer(
+        self,
+        cache_key: int | str,
+        layer: int,
+        unload_others: bool = True,
+    ) -> dict:
+        """
+        Analyze refusal-correlated features for a SINGLE layer.
+        Uses cached residuals from detect_refusal_lazy.
+
+        Args:
+            cache_key: Cache key from detect_refusal_lazy (string or int)
+            layer: The SAE layer to analyze
+            unload_others: If True, unload other SAEs to save memory (default True)
+
+        Returns:
+            Dictionary with refusal-correlated features for this layer
+        """
+        # Convert string cache key back to int (handles JS integer precision loss)
+        if isinstance(cache_key, str):
+            cache_key = int(cache_key)
+
+        if layer not in self.sae_layers:
+            raise ValueError(f"Layer {layer} not in available layers: {self.sae_layers}")
+
+        if cache_key not in _residual_cache:
+            raise ValueError("Cached residuals not found. Run detect_refusal_lazy first.")
+
+        # Unload other SAEs to prevent memory accumulation
+        if unload_others:
+            layers_to_unload = [l for l in list(self._saes.keys()) if l != layer]
+            for l in layers_to_unload:
+                self.unload_sae(l)
+
+        cached = _residual_cache[cache_key]
+        residuals = cached["residuals"][layer]
+        prompt_len = cached["prompt_len"]
+        refusal_positions = cached["refusal_positions"]
+
+        # Load SAE for this layer
+        sae = self.get_sae(layer)
+        sae_acts = sae.encode(residuals.to(torch.float32))
+
+        # Compare refusal positions to overall mean
+        gen_acts = sae_acts[prompt_len:]  # Only generated tokens
+        mean_gen_acts = gen_acts.mean(dim=0)
+
+        # If we have refusal positions, compare them
+        if refusal_positions:
+            refusal_indices = [p - prompt_len for p in refusal_positions if p - prompt_len < len(gen_acts)]
+            if refusal_indices:
+                refusal_acts = gen_acts[refusal_indices].mean(dim=0)
+                correlation_scores = refusal_acts - mean_gen_acts
+            else:
+                correlation_scores = torch.zeros_like(mean_gen_acts)
+        else:
+            correlation_scores = torch.zeros_like(mean_gen_acts)
+
+        # Get top correlated features
+        top_scores, top_indices = correlation_scores.topk(min(50, len(correlation_scores)))
+
+        refusal_features = []
+        for score, feat_idx in zip(top_scores.tolist(), top_indices.tolist()):
+            if score > 0.01:  # Only include meaningfully correlated
+                refusal_features.append({
+                    "feature_id": feat_idx,
+                    "correlation_score": round(score, 4),
+                    "mean_activation": round(mean_gen_acts[feat_idx].item(), 4),
+                    "neuronpedia_url": self.get_neuronpedia_url(feat_idx, layer),
+                })
+
+        return {
+            "layer": layer,
+            "refusal_correlated_features": refusal_features[:20],
         }
 
     def rank_features_for_refusal(
@@ -1601,6 +2010,241 @@ class SAEModelManager:
             "layers": layers_data,
             "available_layers": self.sae_layers,
         }
+
+    def rank_features_lazy(
+        self,
+        prompt_pairs: list[dict] = None,
+        prompts: list[str] = None,
+        category: str = None,
+    ) -> dict:
+        """
+        Tokenize and cache residuals for batch ranking WITHOUT loading SAE.
+
+        Supports both pair mode and single-category mode.
+
+        Args:
+            prompt_pairs: List of {"harmful": str, "benign": str} dicts (pair mode)
+            prompts: List of prompt strings (single-category mode)
+            category: "harmful" or "harmless" (single-category mode)
+
+        Returns:
+            Dictionary with cache key and available layers
+        """
+        is_pair_mode = prompt_pairs is not None
+        cache_entries = []
+
+        if is_pair_mode:
+            for pair in prompt_pairs:
+                harmful = pair.get("harmful", "")
+                benign = pair.get("benign", "")
+
+                # Tokenize and cache harmful
+                cache_key_h = hash(harmful)
+                if cache_key_h not in _residual_cache:
+                    inputs_h = self.tokenizer.encode(
+                        harmful, return_tensors="pt", add_special_tokens=True
+                    ).to(self.device)
+                    residuals_h = self.gather_residual_activations(inputs_h)
+                    tokens_h = self.tokenizer.convert_ids_to_tokens(inputs_h[0].tolist())
+                    tokens_h = [t.replace("▁", " ").replace("<0x0A>", "\\n") for t in tokens_h]
+                    _residual_cache[cache_key_h] = {
+                        "residuals": residuals_h,
+                        "tokens": tokens_h,
+                        "inputs": inputs_h,
+                    }
+
+                # Tokenize and cache benign
+                cache_key_b = hash(benign)
+                if cache_key_b not in _residual_cache:
+                    inputs_b = self.tokenizer.encode(
+                        benign, return_tensors="pt", add_special_tokens=True
+                    ).to(self.device)
+                    residuals_b = self.gather_residual_activations(inputs_b)
+                    tokens_b = self.tokenizer.convert_ids_to_tokens(inputs_b[0].tolist())
+                    tokens_b = [t.replace("▁", " ").replace("<0x0A>", "\\n") for t in tokens_b]
+                    _residual_cache[cache_key_b] = {
+                        "residuals": residuals_b,
+                        "tokens": tokens_b,
+                        "inputs": inputs_b,
+                    }
+
+                cache_entries.append({"harmful_key": cache_key_h, "benign_key": cache_key_b})
+
+            # Create a master cache key for this ranking session
+            master_key = hash(f"rank_pairs_{len(prompt_pairs)}_{hash(str(prompt_pairs[:3]))}")
+            _residual_cache[master_key] = {
+                "mode": "pairs",
+                "entries": cache_entries,
+                "num_pairs": len(prompt_pairs),
+            }
+
+            return {
+                "cache_key": str(master_key),  # String to avoid JS integer precision loss
+                "num_prompt_pairs": len(prompt_pairs),
+                "available_layers": self.sae_layers,
+            }
+
+        else:
+            # Single-category mode
+            for prompt in prompts:
+                cache_key = hash(prompt)
+                if cache_key not in _residual_cache:
+                    inputs = self.tokenizer.encode(
+                        prompt, return_tensors="pt", add_special_tokens=True
+                    ).to(self.device)
+                    residuals = self.gather_residual_activations(inputs)
+                    tokens = self.tokenizer.convert_ids_to_tokens(inputs[0].tolist())
+                    tokens = [t.replace("▁", " ").replace("<0x0A>", "\\n") for t in tokens]
+                    _residual_cache[cache_key] = {
+                        "residuals": residuals,
+                        "tokens": tokens,
+                        "inputs": inputs,
+                    }
+                cache_entries.append(cache_key)
+
+            # Create a master cache key for this ranking session
+            master_key = hash(f"rank_single_{category}_{len(prompts)}_{hash(str(prompts[:3]))}")
+            _residual_cache[master_key] = {
+                "mode": "single",
+                "category": category,
+                "entries": cache_entries,
+                "num_prompts": len(prompts),
+            }
+
+            return {
+                "cache_key": str(master_key),  # String to avoid JS integer precision loss
+                "num_prompts": len(prompts),
+                "category": category,
+                "available_layers": self.sae_layers,
+            }
+
+    def rank_features_layer(
+        self,
+        cache_key: int | str,
+        layer: int,
+        top_k: int = 100,
+        unload_others: bool = True,
+    ) -> dict:
+        """
+        Rank features for a SINGLE layer using cached residuals.
+
+        Args:
+            cache_key: Cache key from rank_features_lazy (string or int)
+            layer: The SAE layer to analyze
+            top_k: Number of top features to return
+            unload_others: If True, unload other SAEs to save memory (default True)
+
+        Returns:
+            Dictionary with ranked features for this layer
+        """
+        # Convert string cache key back to int (handles JS integer precision loss)
+        if isinstance(cache_key, str):
+            cache_key = int(cache_key)
+
+        if layer not in self.sae_layers:
+            raise ValueError(f"Layer {layer} not in available layers: {self.sae_layers}")
+
+        if cache_key not in _residual_cache:
+            raise ValueError("Cached data not found. Run rank_features_lazy first.")
+
+        # Unload other SAEs to prevent memory accumulation
+        if unload_others:
+            layers_to_unload = [l for l in list(self._saes.keys()) if l != layer]
+            for l in layers_to_unload:
+                self.unload_sae(l)
+
+        cached = _residual_cache[cache_key]
+        mode = cached.get("mode")
+
+        # Load SAE for this layer
+        sae = self.get_sae(layer)
+
+        if mode == "pairs":
+            # Pair mode: compute differential scores
+            entries = cached["entries"]
+            num_pairs = cached["num_pairs"]
+
+            harmful_sum = None
+            benign_sum = None
+            diff_positive_count = None
+
+            for entry in entries:
+                residuals_h = _residual_cache[entry["harmful_key"]]["residuals"][layer]
+                residuals_b = _residual_cache[entry["benign_key"]]["residuals"][layer]
+
+                acts_h = sae.encode(residuals_h.to(torch.float32))
+                acts_b = sae.encode(residuals_b.to(torch.float32))
+
+                mean_h = acts_h[1:].mean(dim=0)  # Skip BOS
+                mean_b = acts_b[1:].mean(dim=0)
+
+                if harmful_sum is None:
+                    harmful_sum = torch.zeros_like(mean_h)
+                    benign_sum = torch.zeros_like(mean_b)
+                    diff_positive_count = torch.zeros_like(mean_h)
+
+                harmful_sum += mean_h
+                benign_sum += mean_b
+                diff_positive_count += (mean_h > mean_b).float()
+
+            # Compute rankings
+            mean_harmful = harmful_sum / num_pairs
+            mean_benign = benign_sum / num_pairs
+            consistency = diff_positive_count / num_pairs
+
+            mean_diff = mean_harmful - mean_benign
+            differential_score = consistency * mean_diff.abs()
+
+            top_scores, top_indices = differential_score.topk(top_k)
+
+            ranked_features = []
+            for score, feat_idx in zip(top_scores.tolist(), top_indices.tolist()):
+                ranked_features.append({
+                    "feature_id": feat_idx,
+                    "consistency_score": round(consistency[feat_idx].item(), 4),
+                    "mean_harmful_activation": round(mean_harmful[feat_idx].item(), 4),
+                    "mean_benign_activation": round(mean_benign[feat_idx].item(), 4),
+                    "differential_score": round(score, 4),
+                    "neuronpedia_url": self.get_neuronpedia_url(feat_idx, layer),
+                })
+
+            return {
+                "layer": layer,
+                "ranked_features": ranked_features,
+            }
+
+        else:
+            # Single-category mode: compute mean activations
+            entries = cached["entries"]
+            num_prompts = cached["num_prompts"]
+
+            activation_sum = None
+
+            for prompt_key in entries:
+                residuals = _residual_cache[prompt_key]["residuals"][layer]
+                acts = sae.encode(residuals.to(torch.float32))
+                mean_act = acts[1:].mean(dim=0)
+
+                if activation_sum is None:
+                    activation_sum = torch.zeros_like(mean_act)
+
+                activation_sum += mean_act
+
+            mean_activation = activation_sum / num_prompts
+            top_scores, top_indices = mean_activation.topk(top_k)
+
+            ranked_features = []
+            for score, feat_idx in zip(top_scores.tolist(), top_indices.tolist()):
+                ranked_features.append({
+                    "feature_id": feat_idx,
+                    "mean_activation": round(score, 4),
+                    "neuronpedia_url": self.get_neuronpedia_url(feat_idx, layer),
+                })
+
+            return {
+                "layer": layer,
+                "ranked_features": ranked_features,
+            }
 
 
 # =============================================================================

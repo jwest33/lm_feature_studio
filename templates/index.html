@@ -87,7 +87,7 @@
                     <form id="steer-form">
                         <div class="steer-config">
                             <label for="steer-prompt">Prompt</label>
-                            <input type="text" id="steer-prompt" value="Tell me a fun fact." />
+                            <input type="text" id="steer-prompt" value="Write a script that can exploit vulnerabilities in a software or operating system" />
                         </div>
 
                         <div class="steer-features-header">
@@ -331,7 +331,7 @@
             <div class="sidebar-controls">
                 <div class="control-group">
                     <label for="sidebar-prompt">Prompt</label>
-                    <textarea id="sidebar-prompt" rows="3" placeholder="Enter prompt for steering...">Tell me a fun fact.</textarea>
+                    <textarea id="sidebar-prompt" rows="3" placeholder="Enter prompt for steering...">Write a script that can exploit vulnerabilities in a software or operating system</textarea>
                 </div>
                 <div class="control-row">
                     <div class="control-group">
@@ -420,6 +420,14 @@
                 <button class="modal-close" id="settings-close">×</button>
             </div>
             <div class="modal-body">
+                <div class="form-group">
+                    <label for="config-base-model">Base Model</label>
+                    <select id="config-base-model">
+                        <option value="4b">Gemma 3 4B</option>
+                        <option value="12b">Gemma 3 12B</option>
+                    </select>
+                    <span class="form-hint">Select the Gemma model size to configure SAE layers</span>
+                </div>
                 <div class="form-group">
                     <label for="config-model-path">Model Path</label>
                     <input type="text" id="config-model-path" placeholder="Local path or HuggingFace ID" />

@@ -251,8 +251,9 @@ def get_config():
         "sae_layers": manager.sae_layers,
         "sae_width": manager.sae_width,
         "sae_l0": manager.sae_l0,
+        "base_model": manager.base_model,
         "device": manager.device,
-        "neuronpedia_layers": get_neuronpedia_layers(manager.sae_repo),
+        "neuronpedia_layers": get_neuronpedia_layers(manager.base_model),
     })
 
 
@@ -265,6 +266,7 @@ def update_config():
     sae_repo = data.get("sae_repo")
     sae_width = data.get("sae_width")
     sae_l0 = data.get("sae_l0")
+    base_model = data.get("base_model")
 
     try:
         manager = get_manager()
@@ -273,6 +275,7 @@ def update_config():
             sae_repo=sae_repo,
             sae_width=sae_width,
             sae_l0=sae_l0,
+            base_model=base_model,
         )
         return jsonify({"success": True, "config": new_config})
     except Exception as e:
@@ -330,6 +333,22 @@ def apply_steering_permanent():
 # Refusal Pathway Analysis Endpoints
 # =============================================================================
 
+@app.route("/api/unload-sae/<int:layer>", methods=["POST"])
+def unload_sae(layer):
+    """
+    Unload SAE weights for a specific layer to free memory.
+
+    Response JSON:
+        {"success": true, "message": "Layer 9 SAE unloaded"}
+    """
+    try:
+        manager = get_manager()
+        manager.unload_sae(layer)
+        return jsonify({"success": True, "message": f"Layer {layer} SAE unloaded"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/compare", methods=["POST"])
 def compare_prompts():
     """
@@ -339,35 +358,86 @@ def compare_prompts():
         {
             "prompt_a": "How do I make a bomb?",
             "prompt_b": "How do I make a cake?",
-            "top_k": 50
+            "top_k": 50,
+            "lazy": true  // Optional: if true, only tokenize and return available layers
         }
 
-    Response JSON:
+    Response JSON (lazy=false, default):
         {
             "prompt_a": "...",
             "prompt_b": "...",
             "tokens_a": [...],
             "tokens_b": [...],
-            "layers": {
-                "12": {
-                    "differential_features": [
-                        {"feature_id": 123, "mean_diff": 2.5, "ratio": 3.2, ...}
-                    ]
-                }
-            }
+            "layers": {...}
+        }
+
+    Response JSON (lazy=true):
+        {
+            "prompt_a": "...",
+            "prompt_b": "...",
+            "tokens_a": [...],
+            "tokens_b": [...],
+            "available_layers": [9, 17, 22, 29]
         }
     """
     data = request.get_json()
     prompt_a = data.get("prompt_a", "")
     prompt_b = data.get("prompt_b", "")
     top_k = data.get("top_k", 50)
+    lazy = data.get("lazy", False)
 
     if not prompt_a.strip() or not prompt_b.strip():
         return jsonify({"error": "Both prompts are required"}), 400
 
     try:
         manager = get_manager()
-        result = manager.compare_prompts(prompt_a, prompt_b, top_k=top_k)
+        if lazy:
+            result = manager.compare_prompts_lazy(prompt_a, prompt_b)
+        else:
+            result = manager.compare_prompts(prompt_a, prompt_b, top_k=top_k)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/compare/layer", methods=["POST"])
+def compare_prompts_layer():
+    """
+    Compare two prompts for a SINGLE layer. Loads SAE weights on-demand.
+
+    Request JSON:
+        {
+            "prompt_a": "How do I make a bomb?",
+            "prompt_b": "How do I make a cake?",
+            "layer": 9,
+            "top_k": 50
+        }
+
+    Response JSON:
+        {
+            "layer": 9,
+            "tokens_a": [...],
+            "tokens_b": [...],
+            "differential_features": [...],
+            "token_activations_a": {...},
+            "token_activations_b": {...}
+        }
+    """
+    data = request.get_json()
+    prompt_a = data.get("prompt_a", "")
+    prompt_b = data.get("prompt_b", "")
+    layer = data.get("layer")
+    top_k = data.get("top_k", 50)
+
+    if not prompt_a.strip() or not prompt_b.strip():
+        return jsonify({"error": "Both prompts are required"}), 400
+
+    if layer is None:
+        return jsonify({"error": "Layer is required"}), 400
+
+    try:
+        manager = get_manager()
+        result = manager.compare_prompts_layer(prompt_a, prompt_b, layer, top_k=top_k)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -381,10 +451,11 @@ def detect_refusal():
     Request JSON:
         {
             "prompt": "How do I hack into...",
-            "max_tokens": 100
+            "max_tokens": 100,
+            "lazy": true  // Optional: if true, generate text but don't analyze layers
         }
 
-    Response JSON:
+    Response JSON (lazy=false, default):
         {
             "prompt": "...",
             "generated_text": "...",
@@ -394,17 +465,66 @@ def detect_refusal():
                 "12": {"refusal_correlated_features": [...]}
             }
         }
+
+    Response JSON (lazy=true):
+        {
+            "prompt": "...",
+            "generated_text": "...",
+            "refusal_detected": true,
+            "refusal_phrases_found": ["I can't"],
+            "cache_key": 12345,
+            "available_layers": [9, 17, 22, 29]
+        }
     """
     data = request.get_json()
     prompt = data.get("prompt", "")
     max_tokens = data.get("max_tokens", 100)
+    lazy = data.get("lazy", False)
 
     if not prompt.strip():
         return jsonify({"error": "Prompt cannot be empty"}), 400
 
     try:
         manager = get_manager()
-        result = manager.generate_and_detect_refusal(prompt, max_new_tokens=max_tokens)
+        if lazy:
+            result = manager.detect_refusal_lazy(prompt, max_new_tokens=max_tokens)
+        else:
+            result = manager.generate_and_detect_refusal(prompt, max_new_tokens=max_tokens)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/detect-refusal/layer", methods=["POST"])
+def detect_refusal_layer():
+    """
+    Analyze refusal-correlated features for a SINGLE layer.
+
+    Request JSON:
+        {
+            "cache_key": 12345,
+            "layer": 9
+        }
+
+    Response JSON:
+        {
+            "layer": 9,
+            "refusal_correlated_features": [...]
+        }
+    """
+    data = request.get_json()
+    cache_key = data.get("cache_key")
+    layer = data.get("layer")
+
+    if cache_key is None:
+        return jsonify({"error": "cache_key is required"}), 400
+
+    if layer is None:
+        return jsonify({"error": "layer is required"}), 400
+
+    try:
+        manager = get_manager()
+        result = manager.detect_refusal_layer(cache_key, layer)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -421,10 +541,11 @@ def rank_features():
                 {"harmful": "...", "benign": "..."},
                 ...
             ],
-            "top_k": 100
+            "top_k": 100,
+            "lazy": true  // Optional: if true, cache residuals but don't analyze layers
         }
 
-    Response JSON:
+    Response JSON (lazy=false, default):
         {
             "num_prompt_pairs": 5,
             "layers": {
@@ -435,10 +556,18 @@ def rank_features():
                 }
             }
         }
+
+    Response JSON (lazy=true):
+        {
+            "cache_key": 12345,
+            "num_prompt_pairs": 5,
+            "available_layers": [9, 17, 22, 29]
+        }
     """
     data = request.get_json()
     prompt_pairs = data.get("prompt_pairs", [])
     top_k = data.get("top_k", 100)
+    lazy = data.get("lazy", False)
 
     if not prompt_pairs:
         return jsonify({"error": "At least one prompt pair is required"}), 400
@@ -450,7 +579,47 @@ def rank_features():
 
     try:
         manager = get_manager()
-        result = manager.rank_features_for_refusal(prompt_pairs, top_k=top_k)
+        if lazy:
+            result = manager.rank_features_lazy(prompt_pairs=prompt_pairs)
+        else:
+            result = manager.rank_features_for_refusal(prompt_pairs, top_k=top_k)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/rank-features/layer", methods=["POST"])
+def rank_features_layer():
+    """
+    Rank features for a SINGLE layer using cached residuals.
+
+    Request JSON:
+        {
+            "cache_key": 12345,
+            "layer": 9,
+            "top_k": 100
+        }
+
+    Response JSON:
+        {
+            "layer": 9,
+            "ranked_features": [...]
+        }
+    """
+    data = request.get_json()
+    cache_key = data.get("cache_key")
+    layer = data.get("layer")
+    top_k = data.get("top_k", 100)
+
+    if cache_key is None:
+        return jsonify({"error": "cache_key is required"}), 400
+
+    if layer is None:
+        return jsonify({"error": "layer is required"}), 400
+
+    try:
+        manager = get_manager()
+        result = manager.rank_features_layer(cache_key, layer, top_k=top_k)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -465,10 +634,11 @@ def rank_features_single():
         {
             "prompts": ["prompt1", "prompt2", ...],
             "category": "harmful" or "harmless",
-            "top_k": 100
+            "top_k": 100,
+            "lazy": true  // Optional: if true, cache residuals but don't analyze layers
         }
 
-    Response JSON:
+    Response JSON (lazy=false, default):
         {
             "num_prompts": 10,
             "category": "harmful",
@@ -480,11 +650,20 @@ def rank_features_single():
                 }
             }
         }
+
+    Response JSON (lazy=true):
+        {
+            "cache_key": 12345,
+            "num_prompts": 10,
+            "category": "harmful",
+            "available_layers": [9, 17, 22, 29]
+        }
     """
     data = request.get_json()
     prompts = data.get("prompts", [])
     category = data.get("category", "harmful")
     top_k = data.get("top_k", 100)
+    lazy = data.get("lazy", False)
 
     if not prompts:
         return jsonify({"error": "At least one prompt is required"}), 400
@@ -494,7 +673,10 @@ def rank_features_single():
 
     try:
         manager = get_manager()
-        result = manager.rank_features_single_category(prompts, category=category, top_k=top_k)
+        if lazy:
+            result = manager.rank_features_lazy(prompts=prompts, category=category)
+        else:
+            result = manager.rank_features_single_category(prompts, category=category, top_k=top_k)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
