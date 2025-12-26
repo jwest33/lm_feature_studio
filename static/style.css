@@ -1190,6 +1190,10 @@ button:disabled {
 
 .ranking-table {
     width: 100%;
+}
+
+.ranking-table table {
+    width: 100%;
     border-collapse: collapse;
     font-size: 0.8rem;
 }

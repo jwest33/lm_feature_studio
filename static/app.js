@@ -358,6 +358,11 @@ function renderRankingLayerResults(layerData, layer) {
         return;
     }
 
+    // Calculate max activation for normalization
+    const maxActivation = rankingMode === 'pairs'
+        ? Math.max(...features.map(f => f.mean_harmful_activation))
+        : Math.max(...features.map(f => f.mean_activation));
+
     let html = '<div class="ranking-table"><table>';
 
     if (rankingMode === 'pairs') {
@@ -376,6 +381,8 @@ function renderRankingLayerResults(layerData, layer) {
             <tbody>
         `;
         features.forEach((feat, idx) => {
+            // Use mean harmful activation as initial steering strength
+            const activation = feat.mean_harmful_activation;
             html += `
                 <tr class="ranking-row" data-feature="${feat.feature_id}" data-layer="${layer}">
                     <td>${idx + 1}</td>
@@ -384,7 +391,7 @@ function renderRankingLayerResults(layerData, layer) {
                     <td>${feat.mean_harmful_activation.toFixed(3)}</td>
                     <td>${feat.mean_benign_activation.toFixed(3)}</td>
                     <td>${feat.differential_score.toFixed(4)}</td>
-                    <td><button class="add-to-queue-btn" onclick="addToSteeringQueue(${feat.feature_id}, ${layer}, 'batch')">+</button></td>
+                    <td><button class="add-to-queue-btn" onclick="addToSteeringQueue(${feat.feature_id}, ${layer}, 'batch', ${activation}, ${maxActivation})">+</button></td>
                 </tr>
             `;
         });
@@ -401,12 +408,13 @@ function renderRankingLayerResults(layerData, layer) {
             <tbody>
         `;
         features.forEach((feat, idx) => {
+            const activation = feat.mean_activation;
             html += `
                 <tr class="ranking-row" data-feature="${feat.feature_id}" data-layer="${layer}">
                     <td>${idx + 1}</td>
                     <td class="feature-id">#${feat.feature_id}</td>
                     <td>${feat.mean_activation.toFixed(3)}</td>
-                    <td><button class="add-to-queue-btn" onclick="addToSteeringQueue(${feat.feature_id}, ${layer}, 'batch')">+</button></td>
+                    <td><button class="add-to-queue-btn" onclick="addToSteeringQueue(${feat.feature_id}, ${layer}, 'batch', ${activation}, ${maxActivation})">+</button></td>
                 </tr>
             `;
         });
@@ -539,17 +547,25 @@ function updateAddButtonText() {
 // Steering Queue
 // =============================================================================
 
-function addToSteeringQueue(featureId, layer, sourceTab = 'batch') {
+function addToSteeringQueue(featureId, layer, sourceTab = 'batch', activationStrength = null, maxActivation = null) {
     const exists = steeringQueue.some(q => q.feature_id === featureId && q.layer === layer);
     if (exists) {
         setStatus(`Feature #${featureId} (L${layer}) already in queue`);
         return;
     }
 
+    // Normalize activation strength to [-1, 1] range relative to max activation
+    let coefficient = 0.25;  // default
+    if (activationStrength !== null && maxActivation !== null && maxActivation > 0) {
+        coefficient = activationStrength / maxActivation;  // normalized to [0, 1]
+    } else if (activationStrength !== null) {
+        coefficient = Math.max(-1, Math.min(1, activationStrength / 100));  // fallback
+    }
+
     steeringQueue.push({
         feature_id: featureId,
         layer: layer,
-        coefficient: 0.25,
+        coefficient: coefficient,
         source_tab: sourceTab
     });
 

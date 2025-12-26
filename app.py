@@ -11,7 +11,7 @@ import csv
 import io
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, Response
-from sae_model import get_manager, initialize_models
+from sae import get_manager, initialize_models
 
 app = Flask(__name__)
 
@@ -74,7 +74,7 @@ def steer_generation():
     data = request.get_json()
     prompt = data.get("prompt", "")
     steering = data.get("steering", [])
-    max_tokens = data.get("max_tokens", 80)
+    max_tokens = data.get("max_tokens", 256)
     normalization = data.get("normalization", None)
     norm_clamp_factor = data.get("norm_clamp_factor", 1.5)
     unit_normalize = data.get("unit_normalize", False)
@@ -110,7 +110,7 @@ def steer_generation():
 @app.route("/api/config", methods=["GET"])
 def get_config():
     """Get current SAE configuration."""
-    from sae_model import get_neuronpedia_layers
+    from sae import get_neuronpedia_layers
     manager = get_manager()
     return jsonify({
         "model_path": manager.model_path,
@@ -365,7 +365,7 @@ def compare_layer():
                 cache_key_b = result_b["cache_key"]
 
             # Get cached data
-            from sae_model import _residual_cache
+            from sae import _residual_cache
             cached_a = _residual_cache.get(cache_key_a, {})
             cached_b = _residual_cache.get(cache_key_b, {})
 
@@ -580,7 +580,7 @@ def rank_features():
 
             # Store in residual cache for rank_features_layer to use
             # Use integer hash key to match existing rank_features_layer implementation
-            from sae_model import _residual_cache
+            from sae import _residual_cache
             master_key = hash(f"rank_seq_{len(prompt_pairs)}_{hash(str(prompt_pairs[:2]))}")
             _residual_cache[master_key] = {
                 "mode": "pairs",
@@ -674,7 +674,7 @@ def rank_features_single():
             # Store in residual cache for rank_features_layer to use
             # Use integer hash key to match existing rank_features_layer implementation
             # Convert string keys to integers for rank_features_layer compatibility
-            from sae_model import _residual_cache
+            from sae import _residual_cache
             master_key = hash(f"rank_single_seq_{category}_{len(prompts)}_{hash(str(prompts[:2]))}")
             cache_keys_int = [int(k) for k in batch_result["cache_keys"]]
             _residual_cache[master_key] = {
