@@ -2,6 +2,10 @@
 
 Local web interface for exploring Sparse Autoencoder (SAE) features on Gemma models.
 
+<a href="example.jpg"><img src="example.jpg" alt="example" width="500"></a>
+
+## Features
+
 1. **Activation Extraction**: Forward hooks capture residual stream activations at specified layers during inference
 2. **SAE Encoding**: Activations pass through a JumpReLU sparse autoencoder, producing a sparse vector where each non-zero element corresponds to an interpretable feature
 3. **Feature Lookup**: Query [Neuronpedia](https://www.neuronpedia.org/), a community database of SAE feature interpretations, to retrieve human-readable explanations, example activations, and token associations for discovered features
@@ -26,12 +30,12 @@ Optional: Add `NEURONPEDIA_API_KEY` to `.env` for feature explanations.
 python app.py
 ```
 
-Pre-load models to avoid first-request delay:
+Pre-load models to avoid first-request delay (not recommended):
 ```bash
 PRELOAD_MODELS=1 python app.py
 ```
 
-## Credits
+## Sources
 
 - [Neuronpedia](https://www.neuronpedia.org/) - Feature explanations and visualization data
 - [GemmaScope](https://huggingface.co/google/gemma-scope-2-4b-it) - SAE weights by Google DeepMind
