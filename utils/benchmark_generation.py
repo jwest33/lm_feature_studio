@@ -3,12 +3,13 @@ Benchmark text generation performance for Gemma models.
 
 Usage:
     python utils/benchmark_generation.py
-    python utils/benchmark_generation.py --model D:\models\gemma-3-4b-it
+    python utils/benchmark_generation.py --model /path/to/model
     python utils/benchmark_generation.py --attn eager    # Compare attention implementations
     python utils/benchmark_generation.py --attn sdpa
     python utils/benchmark_generation.py --attn flash_attention_2
 """
 
+import os
 import argparse
 import time
 import torch
@@ -162,8 +163,8 @@ def main():
     parser.add_argument(
         "--model", "-m",
         type=str,
-        default="D:\\models\\gemma-3-12b-it",
-        help="Path to model (default: D:\\models\\gemma-3-12b-it)"
+        default=os.getenv("MODEL_PATH", "google/gemma-3-12b-it"),
+        help="Path to model (default: $MODEL_PATH or google/gemma-3-12b-it)"
     )
     parser.add_argument(
         "--prompt", "-p",

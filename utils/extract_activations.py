@@ -1,3 +1,4 @@
+import os
 import torch
 import json
 import argparse
@@ -9,7 +10,7 @@ from datetime import datetime
 # ==========================================
 # CONFIGURATION (defaults, can be overridden via CLI)
 # ==========================================
-MODEL_PATH = "D:\\models\\gemma-3-4b-it"
+MODEL_PATH = os.getenv("MODEL_PATH", "google/gemma-3-4b-it")
 PROMPTS_FILE = "harmful.txt"
 OUTPUT_DIR = "activations_output"
 MAX_NEW_TOKENS = 512

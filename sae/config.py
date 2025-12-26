@@ -14,9 +14,9 @@ load_dotenv()
 NEURONPEDIA_API_KEY = os.getenv("NEURONPEDIA_API_KEY")
 NEURONPEDIA_BASE_URL = "https://www.neuronpedia.org/api"
 
-# Model path - adjust to your local path or use HuggingFace ID
-# MODEL_PATH = "google/gemma-3-4b-it"  # HuggingFace (requires auth)
-MODEL_PATH = "D:\\models\\gemma-3-4b-it"
+# Model path - set via environment variable or defaults to HuggingFace ID
+# For local models, set MODEL_PATH in .env or environment
+MODEL_PATH = os.getenv("MODEL_PATH", "google/gemma-3-4b-it")
 
 # SAE Configuration
 SAE_REPO = "google/gemma-scope-2-4b-it"
