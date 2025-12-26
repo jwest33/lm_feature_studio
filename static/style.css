@@ -1,4 +1,4 @@
-/* SAE Feature Explorer - Dark Theme */
+/* LM Feature Studio - Dark Theme */
 
 :root {
     --bg-primary: #0d1117;
@@ -45,6 +45,7 @@ body {
     max-width: 1800px;
     margin: 0 auto;
     padding: 0 24px;
+    padding-bottom: 50vh; /* Allow scrolling content higher on screen */
 }
 
 /* Header */
@@ -1184,8 +1185,9 @@ button:disabled {
 
 /* Ranking Table */
 .ranking-results {
-    max-height: 500px;
+    min-height: 300px;
     overflow-y: auto;
+    overflow-anchor: none; /* Prevent scroll anchoring on content changes */
 }
 
 .ranking-table {
@@ -1643,6 +1645,8 @@ button:disabled {
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    overflow-anchor: none; /* Prevent scroll anchoring on content changes */
+    min-height: 500px; /* Prevent layout shift when loading content */
 }
 
 .mode-feature-detail .placeholder {
@@ -1758,13 +1762,19 @@ button:disabled {
 }
 
 .split-panel .diff-results {
-    max-height: 700px;
+    max-height: none;
     overflow-y: auto;
 }
 
-.split-panel .refusal-features,
+.split-panel .refusal-features {
+    max-height: none;
+    min-height: 400px;
+    overflow-y: auto;
+}
+
 .split-panel .ranking-results {
-    max-height: 450px;
+    max-height: calc(100vh - 450px);
+    min-height: 300px;
     overflow-y: auto;
 }
 
@@ -2499,4 +2509,441 @@ body.sidebar-resizing * {
 .btn-bake:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+}
+
+/* =============================================================================
+   Activation Strength Color Visualization
+   ============================================================================= */
+
+.activation-cell {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.activation-bar-container {
+    flex: 1;
+    height: 12px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    overflow: hidden;
+    position: relative;
+    min-width: 60px;
+}
+
+.activation-bar {
+    height: 100%;
+    border-radius: 6px;
+    transition: width 0.2s ease;
+}
+
+.activation-bar.harmful {
+    background: linear-gradient(90deg, rgba(248, 81, 73, 0.4), rgba(248, 81, 73, 0.9));
+}
+
+.activation-bar.benign {
+    background: linear-gradient(90deg, rgba(63, 185, 80, 0.4), rgba(63, 185, 80, 0.9));
+}
+
+.activation-value {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    min-width: 50px;
+    text-align: right;
+}
+
+.activation-value.harmful {
+    color: var(--accent-red);
+}
+
+.activation-value.benign {
+    color: var(--accent-green);
+}
+
+/* Dual-bar for showing both harmful and benign in single cell */
+.dual-activation-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    width: 100%;
+}
+
+.dual-activation-bars .activation-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.dual-activation-bars .activation-bar-container {
+    flex: 1;
+    height: 8px;
+}
+
+.dual-activation-bars .activation-label {
+    font-size: 0.6rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    width: 12px;
+}
+
+.dual-activation-bars .activation-label.harmful {
+    color: var(--accent-red);
+}
+
+.dual-activation-bars .activation-label.benign {
+    color: var(--accent-green);
+}
+
+/* Ranking table with activation visualization */
+.ranking-table td.activation-visual {
+    padding: 4px 8px;
+}
+
+.ranking-table .activation-comparison {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.ranking-table .activation-comparison .bar-group {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.ranking-table .activation-comparison .bar-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.ranking-table .activation-comparison .bar-label {
+    font-size: 0.6rem;
+    font-weight: 600;
+    width: 10px;
+    color: var(--text-muted);
+}
+
+.ranking-table .activation-comparison .bar-label.h {
+    color: var(--accent-red);
+}
+
+.ranking-table .activation-comparison .bar-label.b {
+    color: var(--accent-green);
+}
+
+.ranking-table .mini-bar {
+    height: 6px;
+    border-radius: 3px;
+    flex: 1;
+    max-width: 80px;
+}
+
+.ranking-table .mini-bar.harmful {
+    background: var(--accent-red);
+    opacity: 0.85;
+}
+
+.ranking-table .mini-bar.benign {
+    background: var(--accent-green);
+    opacity: 0.85;
+}
+
+/* Differential score indicator */
+.diff-indicator {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.diff-indicator .diff-arrow {
+    font-size: 0.8rem;
+}
+
+.diff-indicator .diff-arrow.positive,
+.diff-indicator span.positive {
+    color: var(--accent-red);
+}
+
+.diff-indicator .diff-arrow.negative,
+.diff-indicator span.negative {
+    color: var(--accent-green);
+}
+
+/* =============================================================================
+   Token Activation Visualization
+   ============================================================================= */
+
+.token-activations-section {
+    margin-top: 12px;
+    padding: 12px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-color);
+}
+
+.token-activations-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 12px;
+}
+
+.token-activations-loading {
+    padding: 20px;
+    text-align: center;
+}
+
+/* Token pairs container */
+.token-pairs-container,
+.token-single-container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-height: 350px;
+    overflow-y: auto;
+}
+
+.token-pair {
+    background: var(--bg-secondary);
+    border-radius: var(--radius-sm);
+    padding: 10px;
+    border: 1px solid var(--border-color);
+}
+
+.token-pair-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.token-pair-row {
+    margin-bottom: 6px;
+}
+
+.token-pair-row:last-child {
+    margin-bottom: 0;
+}
+
+.token-prompt {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.prompt-label {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.65rem;
+    font-weight: 700;
+    margin-top: 2px;
+}
+
+.prompt-label.harmful {
+    background: var(--accent-red);
+    color: white;
+}
+
+.prompt-label.benign {
+    background: var(--accent-green);
+    color: white;
+}
+
+.token-visualization {
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.6;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1px;
+}
+
+/* Individual token with activation color */
+.act-token {
+    display: inline;
+    padding: 2px 1px;
+    border-radius: 2px;
+    transition: all 0.1s;
+    cursor: default;
+}
+
+.act-token.harmful {
+    background: rgba(248, 81, 73, var(--act-opacity, 0.1));
+    border-bottom: 2px solid rgba(248, 81, 73, var(--act-opacity, 0.2));
+}
+
+.act-token.benign {
+    background: rgba(63, 185, 80, var(--act-opacity, 0.1));
+    border-bottom: 2px solid rgba(63, 185, 80, var(--act-opacity, 0.2));
+}
+
+.act-token:hover {
+    filter: brightness(1.2);
+}
+
+.act-token.bos {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    font-style: italic;
+    padding: 1px 4px;
+}
+
+/* Single prompt mode */
+.token-single-prompt {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    border: 1px solid var(--border-color);
+}
+
+.prompt-index {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.more-prompts-note {
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-style: italic;
+    padding: 8px;
+}
+
+/* Activation legend */
+.activation-legend {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    padding: 8px 10px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-sm);
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.legend-label {
+    font-weight: 500;
+}
+
+.legend-low,
+.legend-high {
+    font-size: 0.65rem;
+}
+
+.legend-gradient {
+    flex: 1;
+    height: 8px;
+    border-radius: 4px;
+    background: linear-gradient(
+        to right,
+        rgba(255, 150, 100, 0.1),
+        rgba(255, 150, 100, 0.9)
+    );
+    max-width: 100px;
+}
+
+/* =============================================================================
+   Prompt Token Visualization Section
+   ============================================================================= */
+
+.prompt-token-viz {
+    margin-top: 16px;
+    padding: 16px;
+    background: var(--bg-tertiary);
+    border: 2px solid var(--accent-blue);
+    border-radius: var(--radius-lg);
+    animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.token-viz-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.token-viz-header h3 {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--accent-blue);
+    margin: 0;
+}
+
+.token-viz-header #selected-feature-label {
+    color: var(--text-primary);
+}
+
+.token-viz-content {
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+/* Max activation badge */
+.max-act-badge {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    margin-left: 8px;
+}
+
+.max-act-badge.harmful {
+    background: rgba(248, 81, 73, 0.2);
+    color: var(--accent-red);
+}
+
+.max-act-badge.benign {
+    background: rgba(63, 185, 80, 0.2);
+    color: var(--accent-green);
+}
+
+/* Make token prompts display flex to accommodate badge */
+.token-prompt {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.token-single-prompt {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    border: 1px solid var(--border-color);
 }

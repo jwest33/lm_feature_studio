@@ -197,10 +197,17 @@ class SteeringMixin:
         scale_factor: float = 1.0,
     ) -> dict:
         """
-        Apply steering vectors permanently to model weights and save.
+        Apply steering vectors permanently to model weights using abliteration-style
+        weight surgery. Works with any architecture (no bias required).
 
-        This modifies the model's MLP output projection bias (or adds one if
-        it doesn't exist) to incorporate the steering effect permanently.
+        This modifies the MLP down_proj weights to amplify or suppress feature directions:
+        - Positive coefficient: amplify the feature direction
+        - Negative coefficient: suppress/abliterate the feature direction
+
+        The modification formula:
+            W_new = W + scale * (d @ d.T) @ W.T / ||d||²
+
+        Where d is the decoder vector (feature direction in residual stream space).
 
         Args:
             features: List of {layer, feature_id, coefficient} dicts
@@ -210,6 +217,9 @@ class SteeringMixin:
         Returns:
             Dictionary with status and details
         """
+        import json
+        from datetime import datetime
+
         # Ensure model is loaded
         _ = self.model
 
@@ -232,55 +242,73 @@ class SteeringMixin:
                 layer = self.layers[layer_idx]
 
                 # Find the MLP down_proj - handle different architectures
-                mlp = None
                 down_proj = None
+                down_proj_path = None
+
                 if hasattr(layer, 'mlp'):
                     mlp = layer.mlp
                     if hasattr(mlp, 'down_proj'):
                         down_proj = mlp.down_proj
+                        down_proj_path = f"layers.{layer_idx}.mlp.down_proj"
                 elif hasattr(layer, 'feed_forward'):
                     mlp = layer.feed_forward
-                    if hasattr(mlp, 'w2'):  # Some models use w2 for down projection
+                    if hasattr(mlp, 'w2'):
                         down_proj = mlp.w2
+                        down_proj_path = f"layers.{layer_idx}.feed_forward.w2"
 
                 if down_proj is None:
                     # Try to find any linear layer we can modify
                     for name, module in layer.named_modules():
                         if 'down' in name.lower() and hasattr(module, 'weight'):
                             down_proj = module
+                            down_proj_path = f"layers.{layer_idx}.{name}"
                             break
 
                 if down_proj is None:
                     raise ValueError(f"Could not find MLP down projection for layer {layer_idx}")
 
-                # Calculate combined steering vector for this layer
-                combined_steering = torch.zeros(down_proj.weight.shape[0], device=self.device, dtype=torch.bfloat16)
+                weight_dtype = down_proj.weight.dtype
+                weight_device = down_proj.weight.device
 
+                # Apply abliteration-style weight surgery for each feature
                 for feat in feats:
                     feat_idx = feat["feature_id"]
                     coeff = feat["coefficient"] * scale_factor
 
-                    # Get decoder vector
-                    decoder_vec = sae.w_dec[feat_idx].to(self.device).to(torch.bfloat16)
+                    # Get decoder vector (feature direction in residual stream)
+                    decoder_vec = sae.w_dec[feat_idx].to(device=weight_device, dtype=weight_dtype)
 
-                    # Add to combined steering (decoder_vec is d_model dimensional)
-                    combined_steering += coeff * decoder_vec
+                    # Normalize the direction
+                    direction_norm = torch.norm(decoder_vec)
+                    if direction_norm < 1e-8:
+                        print(f"Warning: Feature {feat_idx} has near-zero norm, skipping")
+                        continue
 
-                # Add steering to the bias
-                if down_proj.bias is None:
-                    # Create and register a new bias parameter
-                    # Must use register_parameter so it's included in state_dict
-                    down_proj.register_parameter('bias', nn.Parameter(combined_steering.clone()))
-                    print(f"Created new bias for layer {layer_idx}")
-                else:
-                    # Add to existing bias
-                    down_proj.bias.data += combined_steering
-                    print(f"Modified existing bias for layer {layer_idx}")
+                    # Compute projection matrix component: d @ d.T / ||d||²
+                    # down_proj.weight shape: (hidden_dim, intermediate_dim)
+                    # decoder_vec shape: (hidden_dim,)
+                    #
+                    # We want to modify how much the output projects onto this direction
+                    # W_new = W + coeff * (d ⊗ d) @ W / ||d||²
+                    # But more directly: modify the output projection along d
+
+                    # Project each column of W onto d, then scale that projection
+                    # proj = (W.T @ d) gives how much each intermediate dim contributes to d
+                    # W_new = W + coeff * d.unsqueeze(1) @ proj.unsqueeze(0) / ||d||²
+
+                    proj = down_proj.weight.T @ decoder_vec  # (intermediate_dim,)
+                    delta = coeff * torch.outer(decoder_vec, proj) / (direction_norm ** 2)
+
+                    down_proj.weight.data += delta
+
+                    action = "amplified" if coeff > 0 else "suppressed"
+                    print(f"Layer {layer_idx}: {action} feature {feat_idx} (coeff={coeff:.3f})")
 
                 modifications.append({
                     "layer": layer_idx,
                     "features": len(feats),
-                    "steering_norm": float(torch.norm(combined_steering).cpu()),
+                    "target_module": down_proj_path,
+                    "method": "abliteration",
                 })
 
         # Save the modified model
@@ -291,9 +319,27 @@ class SteeringMixin:
         self._model.save_pretrained(output_path)
         self.tokenizer.save_pretrained(output_path)
 
+        # Save steering configuration for reproducibility
+        steering_config = {
+            "created_at": datetime.now().isoformat(),
+            "source_model": self.model_path,
+            "sae_repo": self.sae_repo,
+            "sae_width": self.sae_width,
+            "sae_l0": self.sae_l0,
+            "scale_factor": scale_factor,
+            "method": "abliteration",
+            "features": features,
+            "modifications": modifications,
+        }
+        config_path = os.path.join(output_path, "steering_config.json")
+        with open(config_path, "w") as f:
+            json.dump(steering_config, f, indent=2)
+        print(f"Saved steering configuration to {config_path}")
+
         return {
             "success": True,
             "output_path": output_path,
+            "config_path": config_path,
             "modifications": modifications,
             "total_features": sum(len(lf) for lf in layer_features.values()),
         }

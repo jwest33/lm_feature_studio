@@ -1,5 +1,5 @@
 """
-SAE Feature Explorer
+LM Feature Studio
 
 A modular package for exploring Sparse Autoencoder features on Gemma models.
 """

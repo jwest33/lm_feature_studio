@@ -1,5 +1,5 @@
 """
-Flask SAE Feature Explorer - Batch Ranking Mode
+Flask LM Feature Studio - Batch Ranking Mode
 
 A local web app for exploring SAE features on Gemma models,
 focused on batch feature ranking across prompt pairs.
@@ -637,6 +637,40 @@ def rank_features_layer():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/rank-features/token-activations", methods=["POST"])
+def get_feature_token_activations():
+    """
+    Get token-level activations for a specific feature across all cached prompts.
+
+    Request JSON:
+        {
+            "cache_key": "12345",
+            "layer": 9,
+            "feature_id": 12345
+        }
+    """
+    data = request.get_json()
+    cache_key = data.get("cache_key")
+    layer = data.get("layer")
+    feature_id = data.get("feature_id")
+
+    if cache_key is None:
+        return jsonify({"error": "cache_key is required"}), 400
+
+    if layer is None:
+        return jsonify({"error": "layer is required"}), 400
+
+    if feature_id is None:
+        return jsonify({"error": "feature_id is required"}), 400
+
+    try:
+        manager = get_manager()
+        result = manager.get_feature_token_activations_for_ranking(cache_key, layer, feature_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/rank-features-single", methods=["POST"])
 def rank_features_single():
     """
@@ -763,7 +797,7 @@ def export_rankings():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("SAE Feature Explorer - Batch Ranking")
+    print("LM Feature Studio - Batch Ranking")
     print("=" * 60)
 
     if PRELOAD_MODELS:

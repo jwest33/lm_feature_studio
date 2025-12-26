@@ -1,5 +1,5 @@
 /**
- * SAE Feature Explorer - Batch Ranking Mode
+ * LM Feature Studio - Batch Ranking Mode
  */
 
 // =============================================================================
@@ -201,6 +201,19 @@ async function rankFeaturesLayerAPI(cacheKey, layer, topK = 100) {
     return response.json();
 }
 
+async function getFeatureTokenActivationsAPI(cacheKey, layer, featureId) {
+    const response = await fetch('/api/rank-features/token-activations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cache_key: cacheKey, layer, feature_id: featureId })
+    });
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Token activations failed');
+    }
+    return response.json();
+}
+
 async function exportData(endpoint, data, format) {
     const response = await fetch(endpoint, {
         method: 'POST',
@@ -358,10 +371,15 @@ function renderRankingLayerResults(layerData, layer) {
         return;
     }
 
-    // Calculate max activation for normalization
-    const maxActivation = rankingMode === 'pairs'
-        ? Math.max(...features.map(f => f.mean_harmful_activation))
-        : Math.max(...features.map(f => f.mean_activation));
+    // Calculate max activations for bar normalization
+    let maxHarmful = 0, maxBenign = 0, maxActivation = 0;
+    if (rankingMode === 'pairs') {
+        maxHarmful = Math.max(...features.map(f => f.mean_harmful_activation));
+        maxBenign = Math.max(...features.map(f => f.mean_benign_activation));
+        maxActivation = Math.max(maxHarmful, maxBenign);
+    } else {
+        maxActivation = Math.max(...features.map(f => f.mean_activation));
+    }
 
     let html = '<div class="ranking-table"><table>';
 
@@ -372,8 +390,7 @@ function renderRankingLayerResults(layerData, layer) {
                     <th>Rank</th>
                     <th>Feature</th>
                     <th>Consistency</th>
-                    <th>Harmful Avg</th>
-                    <th>Benign Avg</th>
+                    <th>Activation Comparison</th>
                     <th>Diff Score</th>
                     <th></th>
                 </tr>
@@ -381,21 +398,50 @@ function renderRankingLayerResults(layerData, layer) {
             <tbody>
         `;
         features.forEach((feat, idx) => {
-            // Use mean harmful activation as initial steering strength
             const activation = feat.mean_harmful_activation;
+            const harmfulPct = maxActivation > 0 ? (feat.mean_harmful_activation / maxActivation * 100) : 0;
+            const benignPct = maxActivation > 0 ? (feat.mean_benign_activation / maxActivation * 100) : 0;
+            // Determine direction based on actual activation comparison
+            const harmfulHigher = feat.mean_harmful_activation > feat.mean_benign_activation;
+            const diffArrow = harmfulHigher ? '↑' : '↓';
+            const diffClass = harmfulHigher ? 'positive' : 'negative';
+            // Show signed difference value
+            const signedDiff = feat.mean_harmful_activation - feat.mean_benign_activation;
+            const diffDisplay = (signedDiff >= 0 ? '+' : '') + signedDiff.toFixed(3);
+
             html += `
                 <tr class="ranking-row" data-feature="${feat.feature_id}" data-layer="${layer}">
                     <td>${idx + 1}</td>
                     <td class="feature-id">#${feat.feature_id}</td>
                     <td>${(feat.consistency_score * 100).toFixed(1)}%</td>
-                    <td>${feat.mean_harmful_activation.toFixed(3)}</td>
-                    <td>${feat.mean_benign_activation.toFixed(3)}</td>
-                    <td>${feat.differential_score.toFixed(4)}</td>
+                    <td class="activation-visual">
+                        <div class="activation-comparison">
+                            <div class="bar-group">
+                                <div class="bar-wrapper">
+                                    <span class="bar-label h">H</span>
+                                    <div class="mini-bar harmful" style="width: ${harmfulPct}%"></div>
+                                    <span class="activation-value harmful">${feat.mean_harmful_activation.toFixed(2)}</span>
+                                </div>
+                                <div class="bar-wrapper">
+                                    <span class="bar-label b">B</span>
+                                    <div class="mini-bar benign" style="width: ${benignPct}%"></div>
+                                    <span class="activation-value benign">${feat.mean_benign_activation.toFixed(2)}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </td>
+                    <td>
+                        <div class="diff-indicator">
+                            <span class="diff-arrow ${diffClass}">${diffArrow}</span>
+                            <span class="${diffClass}">${diffDisplay}</span>
+                        </div>
+                    </td>
                     <td><button class="add-to-queue-btn" onclick="addToSteeringQueue(${feat.feature_id}, ${layer}, 'batch', ${activation}, ${maxActivation})">+</button></td>
                 </tr>
             `;
         });
     } else {
+        const barClass = singleCategoryType === 'harmful' ? 'harmful' : 'benign';
         html += `
             <thead>
                 <tr>
@@ -409,11 +455,19 @@ function renderRankingLayerResults(layerData, layer) {
         `;
         features.forEach((feat, idx) => {
             const activation = feat.mean_activation;
+            const activationPct = maxActivation > 0 ? (feat.mean_activation / maxActivation * 100) : 0;
             html += `
                 <tr class="ranking-row" data-feature="${feat.feature_id}" data-layer="${layer}">
                     <td>${idx + 1}</td>
                     <td class="feature-id">#${feat.feature_id}</td>
-                    <td>${feat.mean_activation.toFixed(3)}</td>
+                    <td class="activation-visual">
+                        <div class="activation-cell">
+                            <div class="activation-bar-container">
+                                <div class="activation-bar ${barClass}" style="width: ${activationPct}%"></div>
+                            </div>
+                            <span class="activation-value ${barClass}">${feat.mean_activation.toFixed(3)}</span>
+                        </div>
+                    </td>
                     <td><button class="add-to-queue-btn" onclick="addToSteeringQueue(${feat.feature_id}, ${layer}, 'batch', ${activation}, ${maxActivation})">+</button></td>
                 </tr>
             `;
@@ -440,12 +494,151 @@ function renderRankingLayerResults(layerData, layer) {
     }
 }
 
-function selectRankingFeature(featureId, layer) {
+async function selectRankingFeature(featureId, layer) {
+    // Save scroll position before any DOM updates
+    const scrollY = window.scrollY;
+
     document.querySelectorAll('#ranking-results .ranking-row').forEach(el => {
         el.classList.toggle('selected', parseInt(el.dataset.feature) === featureId);
     });
     selectedLayer = layer;
+
+    // Show Neuronpedia embed in the detail panel
     renderNeuronpediaEmbed(layer, featureId);
+
+    // Restore scroll position after DOM updates
+    requestAnimationFrame(() => {
+        window.scrollTo(0, scrollY);
+    });
+
+    // Show token activation visualization in the prompts area
+    const tokenViz = document.getElementById('prompt-token-viz');
+    const tokenVizContent = document.getElementById('prompt-token-viz-content');
+    const featureLabel = document.getElementById('selected-feature-label');
+
+    if (tokenViz && tokenVizContent && featureLabel) {
+        featureLabel.textContent = `Feature #${featureId} (Layer ${layer})`;
+        tokenVizContent.innerHTML = '<span class="placeholder">Loading token activations...</span>';
+        tokenViz.classList.remove('hidden');
+
+        // Restore scroll position after showing token viz
+        requestAnimationFrame(() => {
+            window.scrollTo(0, scrollY);
+        });
+
+        // Fetch token-level activations for this feature
+        if (rankingCacheKey) {
+            try {
+                const tokenData = await getFeatureTokenActivationsAPI(rankingCacheKey, layer, featureId);
+                renderPromptTokenActivations(tokenData);
+                // Restore scroll position after rendering token activations
+                requestAnimationFrame(() => {
+                    window.scrollTo(0, scrollY);
+                });
+            } catch (error) {
+                console.error('Failed to load token activations:', error);
+                tokenVizContent.innerHTML = '<span class="placeholder">Failed to load token activations</span>';
+            }
+        }
+    }
+}
+
+function renderPromptTokenActivations(tokenData) {
+    const container = document.getElementById('prompt-token-viz-content');
+    if (!container) return;
+
+    let html = '';
+
+    if (tokenData.mode === 'pairs') {
+        // Show all pairs with harmful/benign comparison
+        html += '<div class="token-pairs-container">';
+
+        for (let i = 0; i < tokenData.prompts.length; i++) {
+            const pair = tokenData.prompts[i];
+            html += `
+                <div class="token-pair">
+                    <div class="token-pair-label">Pair ${i + 1}</div>
+                    <div class="token-pair-row">
+                        <div class="token-prompt harmful">
+                            <span class="prompt-label harmful">H</span>
+                            <div class="token-visualization">
+                                ${renderTokensWithActivation(pair.harmful.tokens, pair.harmful.normalized, 'harmful')}
+                            </div>
+                            <span class="max-act-badge harmful">${pair.harmful.max_activation.toFixed(2)}</span>
+                        </div>
+                    </div>
+                    <div class="token-pair-row">
+                        <div class="token-prompt benign">
+                            <span class="prompt-label benign">B</span>
+                            <div class="token-visualization">
+                                ${renderTokensWithActivation(pair.benign.tokens, pair.benign.normalized, 'benign')}
+                            </div>
+                            <span class="max-act-badge benign">${pair.benign.max_activation.toFixed(2)}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        html += '</div>';
+    } else {
+        // Single category mode
+        const category = tokenData.category || 'unknown';
+        const colorClass = category === 'harmful' ? 'harmful' : 'benign';
+
+        html += '<div class="token-single-container">';
+        for (let i = 0; i < tokenData.prompts.length; i++) {
+            const prompt = tokenData.prompts[i];
+            html += `
+                <div class="token-single-prompt">
+                    <span class="prompt-index">${i + 1}</span>
+                    <div class="token-visualization">
+                        ${renderTokensWithActivation(prompt.tokens, prompt.normalized, colorClass)}
+                    </div>
+                    <span class="max-act-badge ${colorClass}">${prompt.max_activation.toFixed(2)}</span>
+                </div>
+            `;
+        }
+        html += '</div>';
+    }
+
+    container.innerHTML = html;
+}
+
+function closeTokenViz() {
+    const tokenViz = document.getElementById('prompt-token-viz');
+    if (tokenViz) {
+        tokenViz.classList.add('hidden');
+    }
+    // Deselect features in ranking table
+    document.querySelectorAll('#ranking-results .ranking-row').forEach(el => {
+        el.classList.remove('selected');
+    });
+}
+
+function renderTokensWithActivation(tokens, normalizedActs, colorClass) {
+    let html = '';
+    for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i];
+        const act = normalizedActs[i] || 0;
+        const opacity = Math.min(0.9, act * 0.9 + 0.1);  // Min 0.1 opacity for visibility
+        const displayToken = escapeHtml(token);
+
+        // Skip BOS token display but show activation
+        if (i === 0 && (token === '<bos>' || token === '<s>')) {
+            html += `<span class="act-token bos ${colorClass}" style="--act-opacity: ${opacity}" title="Activation: ${(act * 100).toFixed(1)}%">${displayToken}</span>`;
+        } else {
+            html += `<span class="act-token ${colorClass}" style="--act-opacity: ${opacity}" title="Activation: ${(act * 100).toFixed(1)}%">${displayToken}</span>`;
+        }
+    }
+    return html;
+}
+
+function toggleNpEmbed(btn) {
+    const container = btn.closest('.np-embed-section').querySelector('.np-embed-container');
+    if (container) {
+        container.classList.toggle('collapsed');
+        btn.textContent = container.classList.contains('collapsed') ? '▶' : '▼';
+    }
 }
 
 // =============================================================================
@@ -544,7 +737,7 @@ function updateAddButtonText() {
 }
 
 // =============================================================================
-// Steering Queue
+// Steering
 // =============================================================================
 
 function addToSteeringQueue(featureId, layer, sourceTab = 'batch', activationStrength = null, maxActivation = null) {
@@ -1190,6 +1383,9 @@ function initEventHandlers() {
             this.closest('.prompt-pair-row')?.remove();
         }
     });
+
+    // Close token visualization button
+    document.getElementById('close-token-viz')?.addEventListener('click', closeTokenViz);
 }
 
 // =============================================================================

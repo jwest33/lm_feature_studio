@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SAE Feature Explorer</title>
+    <title>LM Feature Studio</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -11,7 +11,7 @@
         <!-- Header -->
         <header class="header">
             <div class="header-left">
-                <h1>SAE Feature Explorer</h1>
+                <h1>LM Feature Studio</h1>
                 <span class="subtitle">GemmaScope 2</span>
             </div>
             <button class="settings-btn" id="settings-btn" title="Settings">&#9881;</button>
@@ -57,6 +57,24 @@
                         <button type="button" id="load-preset-btn" class="btn-small">Load Preset</button>
                         <button type="button" id="clear-pairs-btn" class="btn-small btn-danger">Clear All</button>
                     </div>
+
+                    <!-- Token Activation Visualization (appears when a feature is selected) -->
+                    <div id="prompt-token-viz" class="prompt-token-viz hidden">
+                        <div class="token-viz-header">
+                            <h3>Token Activations for <span id="selected-feature-label">Feature #?</span></h3>
+                            <button type="button" id="close-token-viz" class="btn-small" title="Close visualization">×</button>
+                        </div>
+                        <div id="prompt-token-viz-content" class="token-viz-content">
+                            <!-- Token visualizations will be rendered here -->
+                        </div>
+                        <div class="activation-legend">
+                            <span class="legend-label">Activation:</span>
+                            <span class="legend-low">Low</span>
+                            <div class="legend-gradient"></div>
+                            <span class="legend-high">High</span>
+                        </div>
+                    </div>
+
                     <button type="button" id="rank-btn">
                         <span class="btn-text">Rank Features</span>
                         <span class="btn-loading hidden">Ranking...</span>
@@ -95,11 +113,11 @@
         <div class="sidebar-resize-handle" id="sidebar-resize-handle" title="Drag to resize"></div>
         <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle Steering Panel">
             <span class="toggle-icon">&#9881;</span>
-            <span class="toggle-label">Steer</span>
+            <span class="toggle-label">Controller</span>
         </button>
         <div class="sidebar-content">
             <div class="sidebar-header">
-                <h3>Steering Queue</h3>
+                <h3>Feature Controller</h3>
                 <button class="sidebar-close" id="sidebar-close" title="Close">×</button>
             </div>
 

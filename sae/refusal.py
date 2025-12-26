@@ -375,9 +375,11 @@ class RefusalMixin:
             mean_benign = benign_sums[layer_idx] / num_pairs
             consistency = diff_positive_counts[layer_idx] / num_pairs
 
-            # Differential score: consistency * |mean_diff|
+            # Differential score: effective_consistency * |mean_diff|
+            # For features where benign > harmful, use inverse consistency
             mean_diff = mean_harmful - mean_benign
-            differential_score = consistency * mean_diff.abs()
+            effective_consistency = torch.where(mean_diff >= 0, consistency, 1 - consistency)
+            differential_score = effective_consistency * mean_diff.abs()
 
             # Get top features by differential score
             top_scores, top_indices = differential_score.topk(top_k)
@@ -652,8 +654,10 @@ class RefusalMixin:
             mean_benign = benign_sum / num_pairs
             consistency = diff_positive_count / num_pairs
 
+            # For features where benign > harmful, use inverse consistency
             mean_diff = mean_harmful - mean_benign
-            differential_score = consistency * mean_diff.abs()
+            effective_consistency = torch.where(mean_diff >= 0, consistency, 1 - consistency)
+            differential_score = effective_consistency * mean_diff.abs()
 
             top_scores, top_indices = differential_score.topk(top_k)
 
@@ -704,4 +708,116 @@ class RefusalMixin:
             return {
                 "layer": layer,
                 "ranked_features": ranked_features,
+            }
+
+    def get_feature_token_activations_for_ranking(
+        self,
+        cache_key: int | str,
+        layer: int,
+        feature_id: int,
+    ) -> dict:
+        """
+        Get token-level activations for a specific feature across all cached prompts.
+
+        Args:
+            cache_key: Cache key from rank_features_lazy (string or int)
+            layer: The SAE layer
+            feature_id: The feature ID to get activations for
+
+        Returns:
+            Dictionary with token-level activations for each prompt
+        """
+        # Convert string cache key back to int
+        if isinstance(cache_key, str):
+            cache_key = int(cache_key)
+
+        if cache_key not in _residual_cache:
+            raise ValueError("Cached data not found. Run rank_features_lazy first.")
+
+        if layer not in self.sae_layers:
+            raise ValueError(f"Layer {layer} not in available layers: {self.sae_layers}")
+
+        cached = _residual_cache[cache_key]
+        mode = cached.get("mode")
+
+        # Load SAE for this layer
+        sae = self.get_sae(layer)
+
+        if mode == "pairs":
+            entries = cached["entries"]
+            prompt_activations = []
+
+            for i, entry in enumerate(entries):
+                harmful_cache = _residual_cache[entry["harmful_key"]]
+                benign_cache = _residual_cache[entry["benign_key"]]
+
+                # Get harmful prompt activations
+                residuals_h = harmful_cache["residuals"][layer]
+                acts_h = sae.encode(residuals_h.to(device=self.device, dtype=torch.float32))
+                feature_acts_h = acts_h[:, feature_id].detach().cpu().tolist()
+                tokens_h = harmful_cache["tokens"]
+                max_act_h = max(feature_acts_h) if feature_acts_h else 1.0
+
+                # Get benign prompt activations
+                residuals_b = benign_cache["residuals"][layer]
+                acts_b = sae.encode(residuals_b.to(device=self.device, dtype=torch.float32))
+                feature_acts_b = acts_b[:, feature_id].detach().cpu().tolist()
+                tokens_b = benign_cache["tokens"]
+                max_act_b = max(feature_acts_b) if feature_acts_b else 1.0
+
+                max_act = max(max_act_h, max_act_b, 1e-6)
+
+                prompt_activations.append({
+                    "pair_index": i,
+                    "harmful": {
+                        "tokens": tokens_h,
+                        "activations": [round(a, 4) for a in feature_acts_h],
+                        "normalized": [round(a / max_act, 4) for a in feature_acts_h],
+                        "max_activation": round(max_act_h, 4),
+                    },
+                    "benign": {
+                        "tokens": tokens_b,
+                        "activations": [round(a, 4) for a in feature_acts_b],
+                        "normalized": [round(a / max_act, 4) for a in feature_acts_b],
+                        "max_activation": round(max_act_b, 4),
+                    },
+                })
+
+            return {
+                "mode": "pairs",
+                "layer": layer,
+                "feature_id": feature_id,
+                "num_pairs": len(entries),
+                "prompts": prompt_activations,
+            }
+
+        else:
+            # Single-category mode
+            entries = cached["entries"]
+            category = cached.get("category", "unknown")
+            prompt_activations = []
+
+            for i, prompt_key in enumerate(entries):
+                prompt_cache = _residual_cache[prompt_key]
+                residuals = prompt_cache["residuals"][layer]
+                acts = sae.encode(residuals.to(device=self.device, dtype=torch.float32))
+                feature_acts = acts[:, feature_id].detach().cpu().tolist()
+                tokens = prompt_cache["tokens"]
+                max_act = max(feature_acts) if feature_acts else 1e-6
+
+                prompt_activations.append({
+                    "prompt_index": i,
+                    "tokens": tokens,
+                    "activations": [round(a, 4) for a in feature_acts],
+                    "normalized": [round(a / max_act, 4) for a in feature_acts],
+                    "max_activation": round(max_act, 4),
+                })
+
+            return {
+                "mode": "single",
+                "category": category,
+                "layer": layer,
+                "feature_id": feature_id,
+                "num_prompts": len(entries),
+                "prompts": prompt_activations,
             }
