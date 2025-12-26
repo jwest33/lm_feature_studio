@@ -6,7 +6,7 @@
 <a href="example.jpg"><img src="example.jpg" alt="example" width="500"></a>
 </div>
 
-<div align="center"><h2>Features</h2></div>
+## Features
 
 1. **Activation Extraction**: Forward hooks capture residual stream activations at specified layers during inference
 2. **SAE Encoding**: Activations pass through a JumpReLU sparse autoencoder, producing a sparse vector where each non-zero element corresponds to an interpretable feature
@@ -14,7 +14,7 @@
 4. **Feature Analysis**: Compare feature activations across prompts to identify which features correlate with specific behaviors (e.g., refusal)
 5. **Model Updates**: Modify generation by adding scaled SAE decoder vectors back into the residual stream, amplifying or suppressing specific features
 
-<div align="center"><h2>Setup</h2></div>
+## Setup
 
 ```bash
 pip install -r requirements.txt
@@ -26,7 +26,7 @@ Configure `sae/config.py`:
 
 Optional: Add `NEURONPEDIA_API_KEY` to `.env` for feature explanations.
 
-<div align="center"><h2>Usage</h2></div>
+## Usage
 
 ```bash
 python app.py
@@ -37,7 +37,7 @@ Pre-load models to avoid first-request delay (not recommended):
 PRELOAD_MODELS=1 python app.py
 ```
 
-<div align="center"><h2>Sources</h2></div>
+## Sources
 
 - [Neuronpedia](https://www.neuronpedia.org/) - Feature explanations and visualization data
 - [GemmaScope](https://huggingface.co/google/gemma-scope-2-4b-it) - SAE weights by Google DeepMind
