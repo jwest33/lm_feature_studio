@@ -433,9 +433,7 @@ class SAEModelManager(
         clear_residual_cache()
 
 
-# =============================================================================
 # Singleton instance for Flask app
-# =============================================================================
 
 _manager: Optional[SAEModelManager] = None
 

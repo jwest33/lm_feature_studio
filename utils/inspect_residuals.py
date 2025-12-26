@@ -273,9 +273,6 @@ Analysis commands:
             }
             print()
 
-    # ========================================
-    # CLUSTERING ANALYSIS
-    # ========================================
     if args.cluster or args.analyze:
         if residuals is None:
             print("Error: No residuals found for clustering")
@@ -335,9 +332,6 @@ Analysis commands:
             }
             print()
 
-    # ========================================
-    # PCA ANALYSIS
-    # ========================================
     if args.pca or args.analyze:
         if residuals is None:
             print("Error: No residuals found for PCA")
@@ -388,9 +382,6 @@ Analysis commands:
             }
             print()
 
-    # ========================================
-    # SIMILARITY ANALYSIS
-    # ========================================
     if args.similarity or args.analyze:
         if residuals is None:
             print("Error: No residuals found for similarity analysis")
@@ -449,9 +440,6 @@ Analysis commands:
             }
             print()
 
-    # ========================================
-    # DIMENSION ANALYSIS
-    # ========================================
     if args.dimensions or args.analyze:
         if residuals is None:
             print("Error: No residuals found for dimension analysis")
@@ -510,9 +498,6 @@ Analysis commands:
             }
             print()
 
-    # ========================================
-    # EXPORT RESULTS
-    # ========================================
     if args.export:
         export_path = Path(args.export)
         with open(export_path, "w", encoding="utf-8") as f:

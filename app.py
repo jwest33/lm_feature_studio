@@ -30,10 +30,6 @@ def use_sequential_mode() -> bool:
     return manager.base_model == "12b"
 
 
-# =============================================================================
-# Routes
-# =============================================================================
-
 @app.route("/")
 def index():
     """Serve the main UI."""
@@ -158,10 +154,6 @@ def unload_all_saes():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
-# =============================================================================
-# Analysis Endpoints (with sequential mode support for 12b)
-# =============================================================================
 
 @app.route("/api/analyze", methods=["POST"])
 def analyze_prompt():
@@ -521,10 +513,6 @@ def unload_sae(layer):
         return jsonify({"error": str(e)}), 500
 
 
-# =============================================================================
-# Batch Feature Ranking Endpoints
-# =============================================================================
-
 @app.route("/api/rank-features", methods=["POST"])
 def rank_features():
     """
@@ -790,10 +778,6 @@ def export_rankings():
 
     return jsonify({"error": "Invalid format. Use 'json' or 'csv'"}), 400
 
-
-# =============================================================================
-# Main
-# =============================================================================
 
 if __name__ == "__main__":
     print("=" * 60)

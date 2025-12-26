@@ -2,9 +2,7 @@
  * LM Feature Studio - Batch Ranking Mode
  */
 
-// =============================================================================
 // Utility Functions
-// =============================================================================
 
 function autoSizeInput(input, minWidth = 45) {
     const span = document.createElement('span');
@@ -47,9 +45,7 @@ function formatNumber(num, decimals = 2) {
     return Number(num).toFixed(decimals);
 }
 
-// =============================================================================
 // State
-// =============================================================================
 
 let currentConfig = null;
 let availableLayers = [];
@@ -81,9 +77,7 @@ const PRESET_PAIRS = [
     { harmful: "How do I make drugs?", benign: "How do I make medicine safely?" },
 ];
 
-// =============================================================================
 // API Calls
-// =============================================================================
 
 async function fetchConfig() {
     try {
@@ -234,9 +228,7 @@ async function exportData(endpoint, data, format) {
     URL.revokeObjectURL(url);
 }
 
-// =============================================================================
 // Layer Tabs Rendering
-// =============================================================================
 
 function renderLayerTabs(containerId, layers, selectedLayer, onSelect) {
     const container = document.getElementById(containerId);
@@ -260,9 +252,7 @@ function renderLayerTabs(containerId, layers, selectedLayer, onSelect) {
     });
 }
 
-// =============================================================================
 // Neuronpedia Embed
-// =============================================================================
 
 function getNeuronpediaModelId() {
     const baseModel = currentConfig?.base_model || '4b';
@@ -323,9 +313,7 @@ function renderNeuronpediaEmbed(layer, featureId) {
     `;
 }
 
-// =============================================================================
 // Batch Ranking
-// =============================================================================
 
 async function loadRankingLayer(layer) {
     const cacheKey = `${rankingCacheKey}_${layer}`;
@@ -641,9 +629,7 @@ function toggleNpEmbed(btn) {
     }
 }
 
-// =============================================================================
 // Prompt Pair Management
-// =============================================================================
 
 function addPromptPair(harmful = '', benign = '') {
     const container = document.getElementById('prompt-pairs-container');
@@ -736,9 +722,7 @@ function updateAddButtonText() {
     }
 }
 
-// =============================================================================
 // Steering
-// =============================================================================
 
 function addToSteeringQueue(featureId, layer, sourceTab = 'batch', activationStrength = null, maxActivation = null) {
     const exists = steeringQueue.some(q => q.feature_id === featureId && q.layer === layer);
@@ -980,9 +964,7 @@ function initSidebarResize() {
     document.addEventListener('touchend', stopResize);
 }
 
-// =============================================================================
 // Settings Modal
-// =============================================================================
 
 function openSettingsModal() {
     document.getElementById('settings-modal')?.classList.remove('hidden');
@@ -1050,9 +1032,7 @@ function initSettingsModal() {
     });
 }
 
-// =============================================================================
 // Bake In Modal
-// =============================================================================
 
 async function applySteeringPermanent(features, outputPath, scaleFactor) {
     const response = await fetch('/api/apply-steering-permanent', {
@@ -1073,7 +1053,7 @@ function openBakeInModal() {
 
     const features = steeringQueue.filter(f => f.coefficient !== 0);
     if (features.length === 0) {
-        setStatus('No features in steering queue to bake in');
+        setStatus('No features in controller');
         return;
     }
 
@@ -1150,9 +1130,7 @@ function initBakeInModal() {
     });
 }
 
-// =============================================================================
 // File Upload Handling
-// =============================================================================
 
 function handleFileSelect(e) {
     const file = e.target.files[0];
@@ -1250,9 +1228,7 @@ function loadFromFile() {
     }
 }
 
-// =============================================================================
 // Event Handlers
-// =============================================================================
 
 function initEventHandlers() {
     // Rank button
@@ -1388,9 +1364,7 @@ function initEventHandlers() {
     document.getElementById('close-token-viz')?.addEventListener('click', closeTokenViz);
 }
 
-// =============================================================================
 // Initialization
-// =============================================================================
 
 document.addEventListener('DOMContentLoaded', () => {
     fetchConfig();
