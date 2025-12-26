@@ -1,8 +1,8 @@
 """
-Flask SAE Feature Explorer
+Flask SAE Feature Explorer - Batch Ranking Mode
 
 A local web app for exploring SAE features on Gemma models,
-replicating the Neuronpedia visualization interface.
+focused on batch feature ranking across prompt pairs.
 """
 
 import os
@@ -19,6 +19,17 @@ app = Flask(__name__)
 PRELOAD_MODELS = os.environ.get("PRELOAD_MODELS", "0") == "1"
 
 
+def use_sequential_mode() -> bool:
+    """
+    Check if sequential loading mode should be used.
+
+    Sequential mode loads LLM and SAE separately (never simultaneously)
+    to reduce peak GPU memory usage. Enabled automatically for 12b models.
+    """
+    manager = get_manager()
+    return manager.base_model == "12b"
+
+
 # =============================================================================
 # Routes
 # =============================================================================
@@ -29,123 +40,6 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/api/analyze", methods=["POST"])
-def analyze_prompt():
-    """
-    Analyze a prompt - lazy mode returns only tokens, eager mode returns all layers.
-
-    Request JSON:
-        {"prompt": "text to analyze", "top_k": 10, "lazy": true}
-
-    With lazy=true (default):
-        Returns tokens and available layers, NO SAE data.
-        Use /api/analyze/layer to fetch individual layer data.
-
-    With lazy=false:
-        Returns full analysis with all layers (loads all SAE weights).
-
-    Response JSON (lazy=true):
-        {
-            "tokens": ["The", " law", ...],
-            "num_tokens": 5,
-            "available_layers": [9, 17, 22, 29],
-            "sae_config": {"width": "65k", "l0": "medium"}
-        }
-    """
-    data = request.get_json()
-    prompt = data.get("prompt", "")
-    top_k = data.get("top_k", 10)
-    lazy = data.get("lazy", True)  # Default to lazy loading
-
-    if not prompt.strip():
-        return jsonify({"error": "Prompt cannot be empty"}), 400
-
-    try:
-        manager = get_manager()
-        if lazy:
-            result = manager.analyze_prompt_lazy(prompt)
-        else:
-            result = manager.analyze_prompt(prompt, top_k=top_k)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/analyze/layer", methods=["POST"])
-def analyze_layer():
-    """
-    Analyze a specific layer for a prompt. Loads SAE weights on-demand.
-
-    Request JSON:
-        {"prompt": "text to analyze", "layer": 9, "top_k": 10}
-
-    Response JSON:
-        {
-            "layer": 9,
-            "sae_acts": [[...], ...],
-            "top_features_per_token": [[...], ...],
-            "top_features_global": [{"id": 123, "mean_activation": 5.2}, ...],
-            "num_features": 262144
-        }
-    """
-    data = request.get_json()
-    prompt = data.get("prompt", "")
-    layer = data.get("layer")
-    top_k = data.get("top_k", 10)
-
-    if not prompt.strip():
-        return jsonify({"error": "Prompt cannot be empty"}), 400
-
-    if layer is None:
-        return jsonify({"error": "Layer is required"}), 400
-
-    try:
-        manager = get_manager()
-        result = manager.analyze_layer(prompt, layer, top_k=top_k)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/feature/<int:feature_id>", methods=["POST"])
-def get_feature_info(feature_id: int):
-    """
-    Get activation pattern for a specific feature.
-
-    Request JSON:
-        {"prompt": "text to analyze", "layer": 12}
-
-    Response JSON:
-        {
-            "feature_id": 123,
-            "layer": 12,
-            "tokens": [...],
-            "activations": [...],
-            "normalized_activations": [...],
-            "top_tokens": [{"token": "energy", "logit": 5.2}, ...]
-        }
-    """
-    data = request.get_json()
-    prompt = data.get("prompt", "")
-    layer = data.get("layer")  # Optional, defaults to first available layer
-
-    if not prompt.strip():
-        return jsonify({"error": "Prompt cannot be empty"}), 400
-
-    try:
-        manager = get_manager()
-
-        # Get activations for this feature at specified layer
-        result = manager.get_feature_activations(prompt, feature_id, layer=layer)
-
-        # Get top predicted tokens for this feature
-        result["top_tokens"] = manager.get_top_logits_for_feature(feature_id, layer=layer, top_k=10)
-
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/api/neuronpedia/<int:layer>/<int:feature_id>", methods=["GET"])
 def get_neuronpedia_data(layer: int, feature_id: int):
     """
@@ -153,19 +47,6 @@ def get_neuronpedia_data(layer: int, feature_id: int):
 
     Returns explanations, lists, positive/negative logits, and top activations
     for the specified feature.
-
-    Response JSON:
-        {
-            "feature_id": 123,
-            "layer": 12,
-            "neuronpedia_url": "https://...",
-            "explanations": [{"description": "...", "score": 0.8}],
-            "positive_logits": [{"token": "energy", "value": 1.23}],
-            "negative_logits": [{"token": "the", "value": -0.5}],
-            "top_activations": [{"tokens": [...], "values": [...], "max_value": 5.2}],
-            "max_activation": 15.5,
-            "frac_nonzero": 0.003
-        }
     """
     try:
         manager = get_manager()
@@ -185,21 +66,9 @@ def steer_generation():
             "prompt": "Tell me a fun fact",
             "steering": [{"feature_id": 123, "coefficient": 0.25, "layer": 12}],
             "max_tokens": 80,
-            "normalization": "preserve_norm",  // Optional: "preserve_norm", "clamp", or null
-            "norm_clamp_factor": 1.5,          // Optional: for "clamp" mode
-            "unit_normalize": true,            // Optional: normalize decoder vectors to unit norm
-            "skip_baseline": false             // Optional: skip baseline generation
-        }
-
-    Response JSON:
-        {
-            "prompt": "...",
-            "original_output": "..." or null,  // null if skip_baseline is true
-            "steered_output": "...",
-            "steering_applied": [...],
-            "steering_layers": [12, 24],
             "normalization": "preserve_norm",
-            "unit_normalize": true
+            "unit_normalize": true,
+            "skip_baseline": false
         }
     """
     data = request.get_json()
@@ -214,12 +83,10 @@ def steer_generation():
     if not prompt.strip():
         return jsonify({"error": "Prompt cannot be empty"}), 400
 
-    # Validate normalization mode
     valid_modes = [None, "preserve_norm", "clamp"]
     if normalization not in valid_modes:
         return jsonify({"error": f"Invalid normalization mode. Use one of: {valid_modes}"}), 400
 
-    # Validate steering config
     for sf in steering:
         if "feature_id" not in sf or "coefficient" not in sf:
             return jsonify({"error": "Each steering entry needs feature_id and coefficient"}), 400
@@ -254,7 +121,329 @@ def get_config():
         "base_model": manager.base_model,
         "device": manager.device,
         "neuronpedia_layers": get_neuronpedia_layers(manager.base_model),
+        "sequential_mode": use_sequential_mode(),
     })
+
+
+@app.route("/api/memory", methods=["GET"])
+def get_memory_status():
+    """Get current memory status for debugging."""
+    try:
+        manager = get_manager()
+        status = manager.get_memory_status()
+        status["sequential_mode"] = use_sequential_mode()
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/unload-llm", methods=["POST"])
+def unload_llm():
+    """Unload LLM to free GPU memory (for sequential mode)."""
+    try:
+        manager = get_manager()
+        manager.unload_llm()
+        return jsonify({"success": True, "message": "LLM unloaded"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/unload-all-saes", methods=["POST"])
+def unload_all_saes():
+    """Unload all SAEs to free GPU memory."""
+    try:
+        manager = get_manager()
+        manager.unload_all_saes()
+        return jsonify({"success": True, "message": "All SAEs unloaded"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# =============================================================================
+# Analysis Endpoints (with sequential mode support for 12b)
+# =============================================================================
+
+@app.route("/api/analyze", methods=["POST"])
+def analyze_prompt():
+    """
+    Analyze a prompt and return SAE activations.
+
+    Automatically uses sequential mode for 12b models.
+
+    Request JSON:
+        {
+            "prompt": "Hello world",
+            "top_k": 10,
+            "lazy": false,
+            "layers": [9, 17]  // optional, defaults to all
+        }
+    """
+    data = request.get_json()
+    prompt = data.get("prompt", "")
+    top_k = data.get("top_k", 10)
+    lazy = data.get("lazy", False)
+    layers = data.get("layers", None)
+
+    if not prompt.strip():
+        return jsonify({"error": "Prompt cannot be empty"}), 400
+
+    try:
+        manager = get_manager()
+
+        # Use sequential mode for 12b models
+        if use_sequential_mode():
+            if lazy:
+                # Lazy mode: just cache residuals and return metadata
+                result = manager.gather_and_cache_residuals(prompt, unload_llm_after=True)
+            else:
+                # Full sequential analysis
+                result = manager.analyze_prompt_sequential(prompt, layers=layers, top_k=top_k)
+        else:
+            # Standard mode for 4b models
+            if lazy:
+                result = manager.analyze_prompt_lazy(prompt)
+            else:
+                result = manager.analyze_prompt(prompt, top_k=top_k)
+
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/analyze/layer", methods=["POST"])
+def analyze_layer():
+    """
+    Analyze a specific layer for a prompt (lazy loading).
+
+    For sequential mode, uses encode_cached_residuals.
+
+    Request JSON:
+        {
+            "prompt": "Hello world",
+            "layer": 9,
+            "top_k": 10,
+            "cache_key": "optional-for-sequential-mode"
+        }
+    """
+    data = request.get_json()
+    prompt = data.get("prompt", "")
+    layer = data.get("layer")
+    top_k = data.get("top_k", 10)
+    cache_key = data.get("cache_key")
+
+    if layer is None:
+        return jsonify({"error": "layer is required"}), 400
+
+    try:
+        manager = get_manager()
+
+        if use_sequential_mode():
+            # Sequential mode: use cache_key if provided, otherwise cache first
+            if cache_key is None:
+                # Need to cache residuals first
+                cache_result = manager.gather_and_cache_residuals(prompt, unload_llm_after=True)
+                cache_key = cache_result["cache_key"]
+
+            result = manager.encode_cached_residuals(
+                cache_key,
+                layer,
+                top_k=top_k,
+                unload_sae_after=True
+            )
+        else:
+            # Standard lazy mode
+            result = manager.analyze_layer(prompt, layer, top_k=top_k)
+
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/compare", methods=["POST"])
+def compare_prompts():
+    """
+    Compare activations between two prompts.
+
+    Automatically uses sequential mode for 12b models.
+
+    Request JSON:
+        {
+            "prompt_a": "harmful prompt",
+            "prompt_b": "benign prompt",
+            "top_k": 50,
+            "threshold": 0.1,
+            "lazy": false,
+            "layers": [9, 17]  // optional
+        }
+    """
+    data = request.get_json()
+    prompt_a = data.get("prompt_a", "")
+    prompt_b = data.get("prompt_b", "")
+    top_k = data.get("top_k", 50)
+    threshold = data.get("threshold", 0.1)
+    lazy = data.get("lazy", False)
+    layers = data.get("layers", None)
+
+    if not prompt_a.strip() or not prompt_b.strip():
+        return jsonify({"error": "Both prompts are required"}), 400
+
+    try:
+        manager = get_manager()
+
+        if use_sequential_mode():
+            if lazy:
+                # Cache residuals for both prompts
+                result_a = manager.gather_and_cache_residuals(prompt_a, unload_llm_after=False)
+                result_b = manager.gather_and_cache_residuals(prompt_b, unload_llm_after=True)
+                result = {
+                    "prompt_a": prompt_a,
+                    "prompt_b": prompt_b,
+                    "tokens_a": result_a["tokens"],
+                    "tokens_b": result_b["tokens"],
+                    "cache_key_a": result_a["cache_key"],
+                    "cache_key_b": result_b["cache_key"],
+                    "available_layers": manager.sae_layers,
+                }
+            else:
+                # Full sequential comparison
+                result = manager.compare_prompts_sequential(
+                    prompt_a, prompt_b,
+                    layers=layers,
+                    top_k=top_k,
+                    threshold=threshold
+                )
+        else:
+            # Standard mode
+            if lazy:
+                result = manager.compare_prompts_lazy(prompt_a, prompt_b)
+            else:
+                result = manager.compare_prompts(prompt_a, prompt_b, top_k=top_k, threshold=threshold)
+
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/compare/layer", methods=["POST"])
+def compare_layer():
+    """
+    Compare activations for a specific layer.
+
+    Request JSON:
+        {
+            "prompt_a": "harmful prompt",
+            "prompt_b": "benign prompt",
+            "layer": 9,
+            "top_k": 50,
+            "threshold": 0.1,
+            "cache_key_a": "optional",
+            "cache_key_b": "optional"
+        }
+    """
+    data = request.get_json()
+    prompt_a = data.get("prompt_a", "")
+    prompt_b = data.get("prompt_b", "")
+    layer = data.get("layer")
+    top_k = data.get("top_k", 50)
+    threshold = data.get("threshold", 0.1)
+    cache_key_a = data.get("cache_key_a")
+    cache_key_b = data.get("cache_key_b")
+
+    if layer is None:
+        return jsonify({"error": "layer is required"}), 400
+
+    try:
+        manager = get_manager()
+
+        if use_sequential_mode():
+            # Ensure residuals are cached
+            if cache_key_a is None:
+                result_a = manager.gather_and_cache_residuals(prompt_a, unload_llm_after=False)
+                cache_key_a = result_a["cache_key"]
+            if cache_key_b is None:
+                result_b = manager.gather_and_cache_residuals(prompt_b, unload_llm_after=True)
+                cache_key_b = result_b["cache_key"]
+
+            # Get cached data
+            from sae_model import _residual_cache
+            cached_a = _residual_cache.get(cache_key_a, {})
+            cached_b = _residual_cache.get(cache_key_b, {})
+
+            tokens_a = cached_a.get("tokens", [])
+            tokens_b = cached_b.get("tokens", [])
+
+            # Load residuals and encode
+            import torch
+            residuals_a = cached_a["residuals"][layer].to(manager.device)
+            residuals_b = cached_b["residuals"][layer].to(manager.device)
+
+            # Load SAE
+            sae = manager.get_sae(layer)
+
+            # Encode
+            sae_acts_a = sae.encode(residuals_a.to(torch.float32))
+            sae_acts_b = sae.encode(residuals_b.to(torch.float32))
+
+            # Compute differential
+            mean_acts_a = sae_acts_a[1:].mean(dim=0)
+            mean_acts_b = sae_acts_b[1:].mean(dim=0)
+            diff = mean_acts_a - mean_acts_b
+            epsilon = 1e-6
+            ratio = mean_acts_a / (mean_acts_b + epsilon)
+
+            mask = (mean_acts_a > threshold) | (mean_acts_b > threshold)
+            valid_indices = torch.where(mask)[0]
+
+            differential_features = []
+            token_acts_a = {}
+            token_acts_b = {}
+
+            if len(valid_indices) > 0:
+                valid_diffs = diff[valid_indices]
+                valid_acts_a = mean_acts_a[valid_indices]
+                valid_acts_b = mean_acts_b[valid_indices]
+                valid_ratios = ratio[valid_indices]
+
+                sorted_indices = torch.argsort(valid_diffs.abs(), descending=True)[:top_k]
+
+                for idx in sorted_indices:
+                    feat_idx = valid_indices[idx].item()
+                    differential_features.append({
+                        "feature_id": feat_idx,
+                        "mean_diff": round(valid_diffs[idx].item(), 4),
+                        "activation_a": round(valid_acts_a[idx].item(), 4),
+                        "activation_b": round(valid_acts_b[idx].item(), 4),
+                        "ratio": round(valid_ratios[idx].item(), 4),
+                        "neuronpedia_url": manager.get_neuronpedia_url(feat_idx, layer),
+                    })
+
+                top_feature_ids = [f["feature_id"] for f in differential_features]
+                for feat_id in top_feature_ids:
+                    token_acts_a[feat_id] = [round(v, 4) for v in sae_acts_a[:, feat_id].tolist()]
+                    token_acts_b[feat_id] = [round(v, 4) for v in sae_acts_b[:, feat_id].tolist()]
+
+            # Unload SAE
+            manager.unload_sae(layer)
+
+            result = {
+                "layer": layer,
+                "tokens_a": tokens_a,
+                "tokens_b": tokens_b,
+                "differential_features": differential_features,
+                "token_activations_a": token_acts_a,
+                "token_activations_b": token_acts_b,
+            }
+        else:
+            # Standard mode
+            result = manager.compare_prompts_layer(
+                prompt_a, prompt_b, layer,
+                top_k=top_k,
+                threshold=threshold
+            )
+
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/config", methods=["POST"])
@@ -294,15 +483,7 @@ def apply_steering_permanent():
                 {"layer": 17, "feature_id": 67890, "coefficient": -0.3}
             ],
             "output_path": "/path/to/save/modified-model",
-            "scale_factor": 1.0  # Optional, default 1.0
-        }
-
-    Response:
-        {
-            "success": true,
-            "output_path": "/path/to/saved/model",
-            "modifications": [...],
-            "total_features": 2
+            "scale_factor": 1.0
         }
     """
     data = request.get_json()
@@ -329,18 +510,9 @@ def apply_steering_permanent():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-# =============================================================================
-# Refusal Pathway Analysis Endpoints
-# =============================================================================
-
 @app.route("/api/unload-sae/<int:layer>", methods=["POST"])
 def unload_sae(layer):
-    """
-    Unload SAE weights for a specific layer to free memory.
-
-    Response JSON:
-        {"success": true, "message": "Layer 9 SAE unloaded"}
-    """
+    """Unload SAE weights for a specific layer to free memory."""
     try:
         manager = get_manager()
         manager.unload_sae(layer)
@@ -349,191 +521,17 @@ def unload_sae(layer):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/compare", methods=["POST"])
-def compare_prompts():
-    """
-    Compare two prompts and return differential activations.
-
-    Request JSON:
-        {
-            "prompt_a": "How do I make a bomb?",
-            "prompt_b": "How do I make a cake?",
-            "top_k": 50,
-            "lazy": true  // Optional: if true, only tokenize and return available layers
-        }
-
-    Response JSON (lazy=false, default):
-        {
-            "prompt_a": "...",
-            "prompt_b": "...",
-            "tokens_a": [...],
-            "tokens_b": [...],
-            "layers": {...}
-        }
-
-    Response JSON (lazy=true):
-        {
-            "prompt_a": "...",
-            "prompt_b": "...",
-            "tokens_a": [...],
-            "tokens_b": [...],
-            "available_layers": [9, 17, 22, 29]
-        }
-    """
-    data = request.get_json()
-    prompt_a = data.get("prompt_a", "")
-    prompt_b = data.get("prompt_b", "")
-    top_k = data.get("top_k", 50)
-    lazy = data.get("lazy", False)
-
-    if not prompt_a.strip() or not prompt_b.strip():
-        return jsonify({"error": "Both prompts are required"}), 400
-
-    try:
-        manager = get_manager()
-        if lazy:
-            result = manager.compare_prompts_lazy(prompt_a, prompt_b)
-        else:
-            result = manager.compare_prompts(prompt_a, prompt_b, top_k=top_k)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/compare/layer", methods=["POST"])
-def compare_prompts_layer():
-    """
-    Compare two prompts for a SINGLE layer. Loads SAE weights on-demand.
-
-    Request JSON:
-        {
-            "prompt_a": "How do I make a bomb?",
-            "prompt_b": "How do I make a cake?",
-            "layer": 9,
-            "top_k": 50
-        }
-
-    Response JSON:
-        {
-            "layer": 9,
-            "tokens_a": [...],
-            "tokens_b": [...],
-            "differential_features": [...],
-            "token_activations_a": {...},
-            "token_activations_b": {...}
-        }
-    """
-    data = request.get_json()
-    prompt_a = data.get("prompt_a", "")
-    prompt_b = data.get("prompt_b", "")
-    layer = data.get("layer")
-    top_k = data.get("top_k", 50)
-
-    if not prompt_a.strip() or not prompt_b.strip():
-        return jsonify({"error": "Both prompts are required"}), 400
-
-    if layer is None:
-        return jsonify({"error": "Layer is required"}), 400
-
-    try:
-        manager = get_manager()
-        result = manager.compare_prompts_layer(prompt_a, prompt_b, layer, top_k=top_k)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/detect-refusal", methods=["POST"])
-def detect_refusal():
-    """
-    Generate response and analyze for refusal patterns.
-
-    Request JSON:
-        {
-            "prompt": "How do I hack into...",
-            "max_tokens": 100,
-            "lazy": true  // Optional: if true, generate text but don't analyze layers
-        }
-
-    Response JSON (lazy=false, default):
-        {
-            "prompt": "...",
-            "generated_text": "...",
-            "refusal_detected": true,
-            "refusal_phrases_found": ["I can't"],
-            "layers": {
-                "12": {"refusal_correlated_features": [...]}
-            }
-        }
-
-    Response JSON (lazy=true):
-        {
-            "prompt": "...",
-            "generated_text": "...",
-            "refusal_detected": true,
-            "refusal_phrases_found": ["I can't"],
-            "cache_key": 12345,
-            "available_layers": [9, 17, 22, 29]
-        }
-    """
-    data = request.get_json()
-    prompt = data.get("prompt", "")
-    max_tokens = data.get("max_tokens", 100)
-    lazy = data.get("lazy", False)
-
-    if not prompt.strip():
-        return jsonify({"error": "Prompt cannot be empty"}), 400
-
-    try:
-        manager = get_manager()
-        if lazy:
-            result = manager.detect_refusal_lazy(prompt, max_new_tokens=max_tokens)
-        else:
-            result = manager.generate_and_detect_refusal(prompt, max_new_tokens=max_tokens)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/detect-refusal/layer", methods=["POST"])
-def detect_refusal_layer():
-    """
-    Analyze refusal-correlated features for a SINGLE layer.
-
-    Request JSON:
-        {
-            "cache_key": 12345,
-            "layer": 9
-        }
-
-    Response JSON:
-        {
-            "layer": 9,
-            "refusal_correlated_features": [...]
-        }
-    """
-    data = request.get_json()
-    cache_key = data.get("cache_key")
-    layer = data.get("layer")
-
-    if cache_key is None:
-        return jsonify({"error": "cache_key is required"}), 400
-
-    if layer is None:
-        return jsonify({"error": "layer is required"}), 400
-
-    try:
-        manager = get_manager()
-        result = manager.detect_refusal_layer(cache_key, layer)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+# =============================================================================
+# Batch Feature Ranking Endpoints
+# =============================================================================
 
 @app.route("/api/rank-features", methods=["POST"])
 def rank_features():
     """
     Rank features across multiple prompt pairs.
+
+    Automatically uses sequential mode for 12b models (caches residuals to CPU,
+    unloads LLM, then processes with SAE).
 
     Request JSON:
         {
@@ -542,26 +540,7 @@ def rank_features():
                 ...
             ],
             "top_k": 100,
-            "lazy": true  // Optional: if true, cache residuals but don't analyze layers
-        }
-
-    Response JSON (lazy=false, default):
-        {
-            "num_prompt_pairs": 5,
-            "layers": {
-                "12": {
-                    "ranked_features": [
-                        {"feature_id": 123, "consistency_score": 0.8, ...}
-                    ]
-                }
-            }
-        }
-
-    Response JSON (lazy=true):
-        {
-            "cache_key": 12345,
-            "num_prompt_pairs": 5,
-            "available_layers": [9, 17, 22, 29]
+            "lazy": true
         }
     """
     data = request.get_json()
@@ -572,17 +551,56 @@ def rank_features():
     if not prompt_pairs:
         return jsonify({"error": "At least one prompt pair is required"}), 400
 
-    # Validate pairs
     for i, pair in enumerate(prompt_pairs):
         if "harmful" not in pair or "benign" not in pair:
             return jsonify({"error": f"Pair {i} missing 'harmful' or 'benign' field"}), 400
 
     try:
         manager = get_manager()
-        if lazy:
-            result = manager.rank_features_lazy(prompt_pairs=prompt_pairs)
+
+        if use_sequential_mode():
+            # Sequential mode: batch cache all residuals first, then unload LLM
+            all_prompts = []
+            for pair in prompt_pairs:
+                all_prompts.append(pair["harmful"])
+                all_prompts.append(pair["benign"])
+
+            # Cache all residuals to CPU, then unload LLM
+            batch_result = manager.gather_and_cache_residuals_batch(all_prompts, unload_llm_after=True)
+
+            # Build cache key mapping for the lazy result
+            # Convert string keys to integers for rank_features_layer compatibility
+            cache_keys = [int(k) for k in batch_result["cache_keys"]]
+            cache_entries = []
+            for i in range(0, len(cache_keys), 2):
+                cache_entries.append({
+                    "harmful_key": cache_keys[i],
+                    "benign_key": cache_keys[i + 1]
+                })
+
+            # Store in residual cache for rank_features_layer to use
+            # Use integer hash key to match existing rank_features_layer implementation
+            from sae_model import _residual_cache
+            master_key = hash(f"rank_seq_{len(prompt_pairs)}_{hash(str(prompt_pairs[:2]))}")
+            _residual_cache[master_key] = {
+                "mode": "pairs",
+                "entries": cache_entries,
+                "num_pairs": len(prompt_pairs),
+            }
+
+            result = {
+                "cache_key": str(master_key),  # String to avoid JS integer precision loss
+                "num_prompt_pairs": len(prompt_pairs),
+                "available_layers": manager.sae_layers,
+                "sequential_mode": True,
+            }
         else:
-            result = manager.rank_features_for_refusal(prompt_pairs, top_k=top_k)
+            # Standard mode
+            if lazy:
+                result = manager.rank_features_lazy(prompt_pairs=prompt_pairs)
+            else:
+                result = manager.rank_features_for_refusal(prompt_pairs, top_k=top_k)
+
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -598,12 +616,6 @@ def rank_features_layer():
             "cache_key": 12345,
             "layer": 9,
             "top_k": 100
-        }
-
-    Response JSON:
-        {
-            "layer": 9,
-            "ranked_features": [...]
         }
     """
     data = request.get_json()
@@ -630,33 +642,14 @@ def rank_features_single():
     """
     Rank features by activation strength on a single category of prompts.
 
+    Automatically uses sequential mode for 12b models.
+
     Request JSON:
         {
             "prompts": ["prompt1", "prompt2", ...],
             "category": "harmful" or "harmless",
             "top_k": 100,
-            "lazy": true  // Optional: if true, cache residuals but don't analyze layers
-        }
-
-    Response JSON (lazy=false, default):
-        {
-            "num_prompts": 10,
-            "category": "harmful",
-            "layers": {
-                "12": {
-                    "ranked_features": [
-                        {"feature_id": 123, "mean_activation": 0.5, ...}
-                    ]
-                }
-            }
-        }
-
-    Response JSON (lazy=true):
-        {
-            "cache_key": 12345,
-            "num_prompts": 10,
-            "category": "harmful",
-            "available_layers": [9, 17, 22, 29]
+            "lazy": true
         }
     """
     data = request.get_json()
@@ -673,66 +666,41 @@ def rank_features_single():
 
     try:
         manager = get_manager()
-        if lazy:
-            result = manager.rank_features_lazy(prompts=prompts, category=category)
+
+        if use_sequential_mode():
+            # Sequential mode: batch cache all residuals first, then unload LLM
+            batch_result = manager.gather_and_cache_residuals_batch(prompts, unload_llm_after=True)
+
+            # Store in residual cache for rank_features_layer to use
+            # Use integer hash key to match existing rank_features_layer implementation
+            # Convert string keys to integers for rank_features_layer compatibility
+            from sae_model import _residual_cache
+            master_key = hash(f"rank_single_seq_{category}_{len(prompts)}_{hash(str(prompts[:2]))}")
+            cache_keys_int = [int(k) for k in batch_result["cache_keys"]]
+            _residual_cache[master_key] = {
+                "mode": "single",
+                "category": category,
+                "entries": cache_keys_int,
+                "num_prompts": len(prompts),
+            }
+
+            result = {
+                "cache_key": str(master_key),  # String to avoid JS integer precision loss
+                "num_prompts": len(prompts),
+                "category": category,
+                "available_layers": manager.sae_layers,
+                "sequential_mode": True,
+            }
         else:
-            result = manager.rank_features_single_category(prompts, category=category, top_k=top_k)
+            # Standard mode
+            if lazy:
+                result = manager.rank_features_lazy(prompts=prompts, category=category)
+            else:
+                result = manager.rank_features_single_category(prompts, category=category, top_k=top_k)
+
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/export/comparison", methods=["POST"])
-def export_comparison():
-    """
-    Export comparison results as JSON or CSV.
-
-    Request JSON:
-        {
-            "data": { ... comparison result ... },
-            "format": "json" or "csv"
-        }
-    """
-    data = request.get_json()
-    comparison_data = data.get("data", {})
-    export_format = data.get("format", "json")
-
-    if export_format == "json":
-        response = Response(
-            json.dumps(comparison_data, indent=2),
-            mimetype="application/json",
-            headers={"Content-Disposition": f"attachment;filename=comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"}
-        )
-        return response
-
-    elif export_format == "csv":
-        output = io.StringIO()
-        writer = csv.writer(output)
-
-        # Header
-        writer.writerow(["Layer", "FeatureID", "MeanDiff", "ActivationA", "ActivationB", "Ratio", "NeuronpediaURL"])
-
-        # Data rows
-        for layer, layer_data in comparison_data.get("layers", {}).items():
-            for feat in layer_data.get("differential_features", []):
-                writer.writerow([
-                    layer,
-                    feat.get("feature_id"),
-                    feat.get("mean_diff"),
-                    feat.get("activation_a"),
-                    feat.get("activation_b"),
-                    feat.get("ratio"),
-                    feat.get("neuronpedia_url"),
-                ])
-
-        response = Response(
-            output.getvalue(),
-            mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment;filename=comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
-        )
-        return response
-
-    return jsonify({"error": "Invalid format. Use 'json' or 'csv'"}), 400
 
 
 @app.route("/api/export/rankings", methods=["POST"])
@@ -795,7 +763,7 @@ def export_rankings():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("SAE Feature Explorer")
+    print("SAE Feature Explorer - Batch Ranking")
     print("=" * 60)
 
     if PRELOAD_MODELS:

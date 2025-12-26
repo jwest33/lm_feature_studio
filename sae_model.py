@@ -187,6 +187,40 @@ class SAEModelManager:
 
         print("Models unloaded and caches cleared.")
 
+    def unload_llm(self):
+        """
+        Unload only the LLM to free GPU memory, preserving SAEs and caches.
+
+        Use this after gathering residuals to free memory before loading SAEs.
+        The tokenizer is kept loaded as it uses minimal memory.
+        """
+        if self._model is not None:
+            del self._model
+            self._model = None
+            self._layers = None
+
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            print("LLM unloaded. Residual cache preserved.")
+        else:
+            print("LLM was not loaded.")
+
+    def unload_all_saes(self):
+        """Unload all SAEs to free GPU memory, preserving LLM and caches."""
+        for sae in self._saes.values():
+            del sae
+        self._saes.clear()
+
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        print("All SAEs unloaded.")
+
     def reconfigure(
         self,
         model_path: str = None,
@@ -578,6 +612,419 @@ class SAEModelManager:
             layer_idx: cache[f"layer_{layer_idx}"].squeeze(0)
             for layer_idx in layers
         }
+
+    # =========================================================================
+    # Sequential Loading Methods (LLM and SAE not in memory simultaneously)
+    # =========================================================================
+
+    def gather_and_cache_residuals(
+        self,
+        prompt: str,
+        unload_llm_after: bool = True,
+        cache_key: str = None,
+    ) -> dict:
+        """
+        Run LLM forward pass, cache residuals to CPU, and optionally unload LLM.
+
+        This is the first step in the sequential workflow where LLM and SAE
+        are never loaded simultaneously to save GPU memory.
+
+        Args:
+            prompt: The text prompt to analyze
+            unload_llm_after: If True, unload LLM after caching residuals (default True)
+            cache_key: Optional custom cache key (defaults to hash of prompt)
+
+        Returns:
+            Dictionary with cache_key, tokens, and available layers
+        """
+        # Tokenize
+        inputs = self.tokenizer.encode(
+            prompt,
+            return_tensors="pt",
+            add_special_tokens=True
+        ).to(self.device)
+
+        # Get string tokens for display
+        str_tokens = self.tokenizer.convert_ids_to_tokens(inputs[0].tolist())
+        str_tokens = [t.replace("▁", " ").replace("<0x0A>", "\\n") for t in str_tokens]
+
+        # Gather residual activations (requires LLM to be loaded)
+        residuals_by_layer = self.gather_residual_activations(inputs)
+
+        # Move residuals to CPU to free GPU memory
+        residuals_cpu = {
+            layer: tensor.cpu() for layer, tensor in residuals_by_layer.items()
+        }
+
+        # Cache with CPU tensors
+        # Use integer hash keys for consistency with rank_features_layer
+        if cache_key is None:
+            cache_key = hash(prompt)
+        elif isinstance(cache_key, str):
+            cache_key = int(cache_key)
+
+        _residual_cache[cache_key] = {
+            "residuals": residuals_cpu,
+            "tokens": str_tokens,
+            "prompt": prompt,
+            "on_cpu": True,  # Flag indicating tensors are on CPU
+        }
+
+        # Optionally unload LLM to free GPU memory for SAE
+        if unload_llm_after:
+            self.unload_llm()
+
+        return {
+            "cache_key": str(cache_key),  # String to avoid JS integer precision loss
+            "tokens": str_tokens,
+            "num_tokens": len(str_tokens),
+            "available_layers": self.sae_layers,
+            "llm_unloaded": unload_llm_after,
+        }
+
+    def gather_and_cache_residuals_batch(
+        self,
+        prompts: list[str],
+        unload_llm_after: bool = True,
+    ) -> dict:
+        """
+        Run LLM forward pass for multiple prompts, cache all residuals to CPU.
+
+        More efficient than calling gather_and_cache_residuals() multiple times
+        as it keeps the LLM loaded until all prompts are processed.
+
+        Args:
+            prompts: List of text prompts to analyze
+            unload_llm_after: If True, unload LLM after caching all residuals
+
+        Returns:
+            Dictionary with cache_keys for each prompt
+        """
+        cache_keys = []
+
+        for prompt in prompts:
+            # Don't unload LLM until we're done with all prompts
+            result = self.gather_and_cache_residuals(
+                prompt,
+                unload_llm_after=False,
+                cache_key=None,
+            )
+            cache_keys.append(result["cache_key"])
+
+        # Unload LLM after processing all prompts
+        if unload_llm_after:
+            self.unload_llm()
+
+        return {
+            "cache_keys": cache_keys,
+            "num_prompts": len(prompts),
+            "available_layers": self.sae_layers,
+            "llm_unloaded": unload_llm_after,
+        }
+
+    def encode_cached_residuals(
+        self,
+        cache_key: int | str,
+        layer: int,
+        top_k: int = 10,
+        unload_sae_after: bool = False,
+    ) -> dict:
+        """
+        Load SAE and encode cached residuals for a specific layer.
+
+        This is the second step in the sequential workflow. Call this after
+        gather_and_cache_residuals() to get SAE activations without having
+        the LLM in memory.
+
+        Args:
+            cache_key: Cache key from gather_and_cache_residuals() (string or int)
+            layer: The SAE layer to analyze
+            top_k: Number of top features to return per token
+            unload_sae_after: If True, unload SAE after encoding (default False)
+
+        Returns:
+            Dictionary with SAE activation data for this layer
+        """
+        # Convert string cache key back to int (handles JS integer precision loss)
+        if isinstance(cache_key, str):
+            cache_key = int(cache_key)
+
+        if cache_key not in _residual_cache:
+            raise ValueError(f"Cache key '{cache_key}' not found. Run gather_and_cache_residuals first.")
+
+        if layer not in self.sae_layers:
+            raise ValueError(f"Layer {layer} not in available layers: {self.sae_layers}")
+
+        cached = _residual_cache[cache_key]
+        residuals_cpu = cached["residuals"][layer]
+        str_tokens = cached["tokens"]
+
+        # Load SAE for this layer (unload others to save memory)
+        layers_to_unload = [l for l in list(self._saes.keys()) if l != layer]
+        for l in layers_to_unload:
+            self.unload_sae(l)
+
+        sae = self.get_sae(layer)
+
+        # Move residuals to GPU for SAE encoding
+        residuals_gpu = residuals_cpu.to(self.device)
+
+        # Encode with SAE
+        sae_acts = sae.encode(residuals_gpu.to(torch.float32))
+
+        # Get top features per token
+        top_acts_per_token, top_features_per_token = sae_acts.topk(top_k, dim=-1)
+
+        # Get globally top features (by mean activation across sequence)
+        mean_acts = sae_acts[1:].mean(dim=0)  # Skip BOS
+        top_global_acts, top_global_features = mean_acts.topk(top_k)
+
+        # Get max activating token for each global top feature
+        global_feature_info = []
+        for feat_idx, mean_act in zip(top_global_features.tolist(), top_global_acts.tolist()):
+            feat_acts = sae_acts[:, feat_idx]
+            max_pos = feat_acts.argmax().item()
+            max_act = feat_acts[max_pos].item()
+            global_feature_info.append({
+                "id": feat_idx,
+                "mean_activation": round(mean_act, 4),
+                "max_activation": round(max_act, 4),
+                "max_token_pos": max_pos,
+                "max_token": str_tokens[max_pos] if max_pos < len(str_tokens) else "?",
+            })
+
+        # Clean up GPU tensor
+        del residuals_gpu
+
+        # Optionally unload SAE
+        if unload_sae_after:
+            self.unload_sae(layer)
+
+        return {
+            "layer": layer,
+            "tokens": str_tokens,
+            "sae_acts": sae_acts.detach().cpu().numpy().tolist(),
+            "top_features_per_token": top_features_per_token.detach().cpu().numpy().tolist(),
+            "top_acts_per_token": top_acts_per_token.detach().cpu().numpy().tolist(),
+            "top_features_global": global_feature_info,
+            "num_features": sae_acts.shape[-1],
+        }
+
+    def analyze_prompt_sequential(
+        self,
+        prompt: str,
+        layers: list[int] = None,
+        top_k: int = 10,
+    ) -> dict:
+        """
+        Analyze a prompt using sequential loading (LLM and SAE never coexist).
+
+        This is a convenience method that combines gather_and_cache_residuals()
+        and encode_cached_residuals() for a complete analysis workflow.
+
+        Args:
+            prompt: The text prompt to analyze
+            layers: List of layers to analyze (defaults to all SAE layers)
+            top_k: Number of top features to return per token
+
+        Returns:
+            Dictionary with tokens and per-layer activation data
+        """
+        if layers is None:
+            layers = self.sae_layers
+
+        # Step 1: Gather residuals and unload LLM
+        cache_result = self.gather_and_cache_residuals(prompt, unload_llm_after=True)
+        cache_key = cache_result["cache_key"]
+        str_tokens = cache_result["tokens"]
+
+        # Step 2: Encode with SAE for each layer
+        layers_data = {}
+        for layer_idx in layers:
+            layer_result = self.encode_cached_residuals(
+                cache_key,
+                layer_idx,
+                top_k=top_k,
+                unload_sae_after=True,  # Unload each SAE after use
+            )
+            layers_data[layer_idx] = {
+                "sae_acts": layer_result["sae_acts"],
+                "top_features_per_token": layer_result["top_features_per_token"],
+                "top_acts_per_token": layer_result["top_acts_per_token"],
+                "top_features_global": layer_result["top_features_global"],
+                "num_features": layer_result["num_features"],
+            }
+
+        # Clean up cache
+        if cache_key in _residual_cache:
+            del _residual_cache[cache_key]
+
+        return {
+            "tokens": str_tokens,
+            "num_tokens": len(str_tokens),
+            "layers": layers_data,
+            "available_layers": self.sae_layers,
+            "sae_config": {
+                "width": self.sae_width,
+                "l0": self.sae_l0,
+            },
+            "sequential_mode": True,
+        }
+
+    def compare_prompts_sequential(
+        self,
+        prompt_a: str,
+        prompt_b: str,
+        layers: list[int] = None,
+        top_k: int = 50,
+        threshold: float = 0.1,
+    ) -> dict:
+        """
+        Compare two prompts using sequential loading (LLM and SAE never coexist).
+
+        Args:
+            prompt_a: First prompt (typically harmful/refused)
+            prompt_b: Second prompt (typically benign/accepted)
+            layers: List of layers to analyze (defaults to all SAE layers)
+            top_k: Number of top differential features per layer
+            threshold: Minimum activation to consider
+
+        Returns:
+            Dictionary with differential features per layer
+        """
+        if layers is None:
+            layers = self.sae_layers
+
+        # Step 1: Gather residuals for both prompts, then unload LLM
+        result_a = self.gather_and_cache_residuals(prompt_a, unload_llm_after=False)
+        result_b = self.gather_and_cache_residuals(prompt_b, unload_llm_after=True)
+
+        cache_key_a = result_a["cache_key"]
+        cache_key_b = result_b["cache_key"]
+        tokens_a = result_a["tokens"]
+        tokens_b = result_b["tokens"]
+
+        # Step 2: Compare activations for each layer
+        layers_data = {}
+        for layer_idx in layers:
+            # Get cached residuals
+            residuals_a = _residual_cache[cache_key_a]["residuals"][layer_idx].to(self.device)
+            residuals_b = _residual_cache[cache_key_b]["residuals"][layer_idx].to(self.device)
+
+            # Load SAE (unloading others)
+            layers_to_unload = [l for l in list(self._saes.keys()) if l != layer_idx]
+            for l in layers_to_unload:
+                self.unload_sae(l)
+
+            sae = self.get_sae(layer_idx)
+
+            # Encode with SAE
+            sae_acts_a = sae.encode(residuals_a.to(torch.float32))
+            sae_acts_b = sae.encode(residuals_b.to(torch.float32))
+
+            # Compute mean activations (skip BOS)
+            mean_acts_a = sae_acts_a[1:].mean(dim=0)
+            mean_acts_b = sae_acts_b[1:].mean(dim=0)
+
+            # Compute differential
+            diff = mean_acts_a - mean_acts_b
+            epsilon = 1e-6
+            ratio = mean_acts_a / (mean_acts_b + epsilon)
+
+            # Get features above threshold
+            mask = (mean_acts_a > threshold) | (mean_acts_b > threshold)
+            valid_indices = torch.where(mask)[0]
+
+            differential_features = []
+            token_acts_a = {}
+            token_acts_b = {}
+
+            if len(valid_indices) > 0:
+                valid_diffs = diff[valid_indices]
+                valid_acts_a = mean_acts_a[valid_indices]
+                valid_acts_b = mean_acts_b[valid_indices]
+                valid_ratios = ratio[valid_indices]
+
+                sorted_indices = torch.argsort(valid_diffs.abs(), descending=True)[:top_k]
+
+                for idx in sorted_indices:
+                    feat_idx = valid_indices[idx].item()
+                    differential_features.append({
+                        "feature_id": feat_idx,
+                        "mean_diff": round(valid_diffs[idx].item(), 4),
+                        "activation_a": round(valid_acts_a[idx].item(), 4),
+                        "activation_b": round(valid_acts_b[idx].item(), 4),
+                        "ratio": round(valid_ratios[idx].item(), 4),
+                        "neuronpedia_url": self.get_neuronpedia_url(feat_idx, layer_idx),
+                    })
+
+                top_feature_ids = [f["feature_id"] for f in differential_features]
+                for feat_id in top_feature_ids:
+                    token_acts_a[feat_id] = [round(v, 4) for v in sae_acts_a[:, feat_id].tolist()]
+                    token_acts_b[feat_id] = [round(v, 4) for v in sae_acts_b[:, feat_id].tolist()]
+
+            layers_data[layer_idx] = {
+                "differential_features": differential_features,
+                "token_activations_a": token_acts_a,
+                "token_activations_b": token_acts_b,
+            }
+
+            # Clean up GPU tensors
+            del residuals_a, residuals_b
+
+            # Unload SAE after each layer
+            self.unload_sae(layer_idx)
+
+        # Clean up caches
+        if cache_key_a in _residual_cache:
+            del _residual_cache[cache_key_a]
+        if cache_key_b in _residual_cache:
+            del _residual_cache[cache_key_b]
+
+        return {
+            "prompt_a": prompt_a,
+            "prompt_b": prompt_b,
+            "tokens_a": tokens_a,
+            "tokens_b": tokens_b,
+            "layers": layers_data,
+            "available_layers": self.sae_layers,
+            "sequential_mode": True,
+        }
+
+    def get_memory_status(self) -> dict:
+        """
+        Get current memory status for debugging sequential loading.
+
+        Returns:
+            Dictionary with memory usage information
+        """
+        import gc
+
+        status = {
+            "llm_loaded": self._model is not None,
+            "saes_loaded": list(self._saes.keys()),
+            "num_cached_residuals": len(_residual_cache),
+            "device": self.device,
+        }
+
+        if torch.cuda.is_available():
+            status["gpu_allocated_mb"] = round(torch.cuda.memory_allocated() / 1024 / 1024, 2)
+            status["gpu_reserved_mb"] = round(torch.cuda.memory_reserved() / 1024 / 1024, 2)
+            status["gpu_max_allocated_mb"] = round(torch.cuda.max_memory_allocated() / 1024 / 1024, 2)
+
+        return status
+
+    def clear_residual_cache_entry(self, cache_key: int | str):
+        """Clear a specific entry from the residual cache."""
+        if isinstance(cache_key, str):
+            cache_key = int(cache_key)
+        if cache_key in _residual_cache:
+            del _residual_cache[cache_key]
+            print(f"Cleared cache entry: {cache_key}")
+
+    # =========================================================================
+    # End Sequential Loading Methods
+    # =========================================================================
 
     def analyze_prompt(self, prompt: str, top_k: int = 10) -> dict:
         """
@@ -2172,8 +2619,8 @@ class SAEModelManager:
                 residuals_h = _residual_cache[entry["harmful_key"]]["residuals"][layer]
                 residuals_b = _residual_cache[entry["benign_key"]]["residuals"][layer]
 
-                acts_h = sae.encode(residuals_h.to(torch.float32))
-                acts_b = sae.encode(residuals_b.to(torch.float32))
+                acts_h = sae.encode(residuals_h.to(device=self.device, dtype=torch.float32))
+                acts_b = sae.encode(residuals_b.to(device=self.device, dtype=torch.float32))
 
                 mean_h = acts_h[1:].mean(dim=0)  # Skip BOS
                 mean_b = acts_b[1:].mean(dim=0)
@@ -2222,7 +2669,7 @@ class SAEModelManager:
 
             for prompt_key in entries:
                 residuals = _residual_cache[prompt_key]["residuals"][layer]
-                acts = sae.encode(residuals.to(torch.float32))
+                acts = sae.encode(residuals.to(device=self.device, dtype=torch.float32))
                 mean_act = acts[1:].mean(dim=0)
 
                 if activation_sum is None:

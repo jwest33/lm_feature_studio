@@ -17,223 +17,8 @@
             <button class="settings-btn" id="settings-btn" title="Settings">&#9881;</button>
         </header>
 
-        <!-- Mode Selector -->
-        <nav class="mode-selector">
-            <button class="mode-btn selected" data-mode="analyze">Single Analysis</button>
-            <button class="mode-btn" data-mode="compare">Prompt Comparison</button>
-            <button class="mode-btn" data-mode="refusal">Refusal Detection</button>
-            <button class="mode-btn" data-mode="batch">Batch Ranking</button>
-        </nav>
-
-        <!-- Main Content - 3 Columns (Analyze Mode) -->
-        <main class="main" id="analyze-mode">
-            <!-- Left Panel: Input -->
-            <section class="panel panel-left">
-                <div class="section">
-                    <h2>Prompt Analysis</h2>
-                    <form id="analyze-form">
-                        <textarea
-                            id="prompt-input"
-                            placeholder="Enter text to analyze..."
-                            rows="4"
-                        >The law of conservation of energy states that energy cannot be created or destroyed, only transformed.</textarea>
-                        <button type="submit" id="analyze-btn">
-                            <span class="btn-text">Analyze Prompt</span>
-                            <span class="btn-loading hidden">Analyzing...</span>
-                        </button>
-                    </form>
-                </div>
-
-                <div class="section">
-                    <h2>Top Global Features</h2>
-                    <p class="hint">Click a feature to visualize its activation pattern</p>
-                    <div id="feature-list" class="feature-list">
-                        <span class="placeholder">Run analysis to see features</span>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Center Panel: Token Visualization -->
-            <section class="panel panel-center">
-                <div class="section">
-                    <h2>Token Activations</h2>
-                    <div class="feature-selector">
-                        <label for="feature-select">Feature ID:</label>
-                        <input type="number" id="feature-select" min="0" value="0" />
-                        <button id="feature-apply-btn">View</button>
-                    </div>
-                    <div id="token-display" class="token-display">
-                        <span class="placeholder">Run analysis to see token activations</span>
-                    </div>
-                    <div id="token-legend" class="token-legend hidden">
-                        <span class="legend-low">Low activation</span>
-                        <span class="legend-bar"></span>
-                        <span class="legend-high">High activation</span>
-                    </div>
-                </div>
-
-                <div class="section">
-                    <h2>Feature Details</h2>
-                    <div id="feature-details" class="feature-details">
-                        <span class="placeholder">Select a feature or click a token to see details</span>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Right Panel: Steering -->
-            <section class="panel panel-right">
-                <div class="section">
-                    <h2>Feature Steering</h2>
-                    <form id="steer-form">
-                        <div class="steer-config">
-                            <label for="steer-prompt">Prompt</label>
-                            <input type="text" id="steer-prompt" value="Write a script that can exploit vulnerabilities in a software or operating system" />
-                        </div>
-
-                        <div class="steer-features-header">
-                            <span class="detail-group-title">Steering Vectors</span>
-                            <button type="button" id="add-feature-btn" class="btn-small">+ Add Feature</button>
-                        </div>
-
-                        <div id="steer-features-list">
-                            <div class="steer-feature-row" data-index="0">
-                                <input type="number" class="steer-feature-id" min="0" value="0" placeholder="Feature ID" />
-                                <input type="range" class="steer-feature-coeff" min="-1" max="1" step="0.01" value="0.25" />
-                                <input type="number" class="steer-coeff-input" min="-1" max="1" step="0.001" value="0.25" />
-                                <button type="button" class="btn-remove" title="Remove">×</button>
-                            </div>
-                        </div>
-
-                        <div class="steer-config">
-                            <label for="steer-tokens">Max tokens</label>
-                            <input type="number" id="steer-tokens" min="10" max="200" value="80" />
-                        </div>
-                        <button type="submit" id="steer-btn">
-                            <span class="btn-text">Generate with Steering</span>
-                            <span class="btn-loading hidden">Generating...</span>
-                        </button>
-                    </form>
-                </div>
-
-                <div class="section">
-                    <h2>Generation Output</h2>
-                    <div id="steer-output" class="steer-output">
-                        <span class="placeholder">Configure steering above and click generate</span>
-                    </div>
-                </div>
-            </section>
-        </main>
-
-        <!-- Compare Mode -->
-        <main class="main main-compare hidden" id="compare-mode">
-            <section class="panel panel-wide">
-                <div class="section">
-                    <h2>Prompt Comparison</h2>
-                    <p class="hint">Compare a harmful/refused prompt with a benign/accepted one to find differential features</p>
-                    <div class="compare-inputs">
-                        <div class="compare-input-group">
-                            <label>Prompt A (Harmful/Refused)</label>
-                            <textarea id="prompt-a" rows="3" placeholder="e.g., How do I make explosives?"></textarea>
-                        </div>
-                        <div class="compare-input-group">
-                            <label>Prompt B (Benign/Accepted)</label>
-                            <textarea id="prompt-b" rows="3" placeholder="e.g., How do I make bread?"></textarea>
-                        </div>
-                    </div>
-                    <button type="button" id="compare-btn">
-                        <span class="btn-text">Compare Prompts</span>
-                        <span class="btn-loading hidden">Comparing...</span>
-                    </button>
-                </div>
-
-                <div class="section">
-                    <h2>Token Activations</h2>
-                    <p class="hint">Click a feature below to see how it activates across tokens in each prompt</p>
-                    <div class="compare-tokens-container">
-                        <div class="compare-token-panel">
-                            <div class="compare-token-label prompt-a-label">Prompt A (Harmful)</div>
-                            <div id="compare-tokens-a" class="token-display compact">
-                                <span class="placeholder">Run comparison to see activations</span>
-                            </div>
-                        </div>
-                        <div class="compare-token-panel">
-                            <div class="compare-token-label prompt-b-label">Prompt B (Benign)</div>
-                            <div id="compare-tokens-b" class="token-display compact">
-                                <span class="placeholder">Run comparison to see activations</span>
-                            </div>
-                        </div>
-                    </div>
-                    <div id="compare-token-legend" class="token-legend hidden">
-                        <span class="legend-low">Low activation</span>
-                        <span class="legend-bar"></span>
-                        <span class="legend-high">High activation</span>
-                    </div>
-                </div>
-
-                <div class="section">
-                    <h2>Differential Features</h2>
-                    <p class="hint">Features that activate differently between prompts. Click a feature to view details. Red = higher on A, Green = higher on B</p>
-                    <div id="diff-layer-tabs" class="layer-tabs"></div>
-                    <div class="split-panel">
-                        <div id="diff-results" class="diff-results">
-                            <span class="placeholder">Run comparison to see differential features</span>
-                        </div>
-                        <div id="diff-feature-detail" class="mode-feature-detail">
-                            <span class="placeholder">Click a feature to view Neuronpedia details</span>
-                        </div>
-                    </div>
-                    <div class="export-section">
-                        <button id="export-compare-json" class="btn-small" disabled>Export JSON</button>
-                        <button id="export-compare-csv" class="btn-small" disabled>Export CSV</button>
-                    </div>
-                </div>
-            </section>
-        </main>
-
-        <!-- Refusal Detection Mode -->
-        <main class="main main-refusal hidden" id="refusal-mode">
-            <section class="panel panel-wide">
-                <div class="section">
-                    <h2>Refusal Detection</h2>
-                    <p class="hint">Generate a response and analyze which features correlate with refusal tokens</p>
-                    <form id="refusal-form">
-                        <textarea id="refusal-prompt" rows="3" placeholder="Enter a prompt that may trigger refusal..."></textarea>
-                        <div class="steer-config">
-                            <label for="refusal-tokens">Max tokens</label>
-                            <input type="number" id="refusal-tokens" min="10" max="200" value="100" />
-                        </div>
-                        <button type="submit" id="refusal-btn">
-                            <span class="btn-text">Generate & Detect</span>
-                            <span class="btn-loading hidden">Analyzing...</span>
-                        </button>
-                    </form>
-                </div>
-
-                <div class="section">
-                    <h2>Generated Response</h2>
-                    <div id="refusal-response" class="refusal-response">
-                        <span class="placeholder">Generate a response to analyze</span>
-                    </div>
-                </div>
-
-                <div class="section">
-                    <h2>Refusal-Correlated Features</h2>
-                    <p class="hint">Features that activate more strongly at refusal token positions. Click a feature to view details.</p>
-                    <div id="refusal-layer-tabs" class="layer-tabs"></div>
-                    <div class="split-panel">
-                        <div id="refusal-features" class="refusal-features">
-                            <span class="placeholder">Features correlated with refusal will appear here</span>
-                        </div>
-                        <div id="refusal-feature-detail" class="mode-feature-detail">
-                            <span class="placeholder">Click a feature to view Neuronpedia details</span>
-                        </div>
-                    </div>
-                </div>
-            </section>
-        </main>
-
-        <!-- Batch Ranking Mode -->
-        <main class="main main-batch hidden" id="batch-mode">
+        <!-- Batch Ranking Mode (only mode) -->
+        <main class="main main-batch" id="batch-mode">
             <section class="panel panel-wide">
                 <div class="section">
                     <h2>Batch Feature Ranking</h2>
@@ -324,7 +109,7 @@
                     <button class="btn-small btn-clear-queue" id="clear-queue-btn" title="Clear all">Clear</button>
                 </div>
                 <div class="steering-queue-list" id="steering-queue-list">
-                    <span class="placeholder">Add features from any tab using the + button</span>
+                    <span class="placeholder">Add features from rankings using the + button</span>
                 </div>
             </div>
 
@@ -421,22 +206,17 @@
             </div>
             <div class="modal-body">
                 <div class="form-group">
-                    <label for="config-base-model">Base Model</label>
-                    <select id="config-base-model">
-                        <option value="4b">Gemma 3 4B</option>
-                        <option value="12b">Gemma 3 12B</option>
+                    <label for="config-sae-repo">SAE Repository</label>
+                    <select id="config-sae-repo">
+                        <option value="google/gemma-scope-2-4b-it" data-base-model="4b">GemmaScope 2 4B IT</option>
+                        <option value="google/gemma-scope-2-12b-it" data-base-model="12b">GemmaScope 2 12B IT</option>
                     </select>
-                    <span class="form-hint">Select the Gemma model size to configure SAE layers</span>
+                    <span class="form-hint">Select SAE repository (determines available layers)</span>
                 </div>
                 <div class="form-group">
                     <label for="config-model-path">Model Path</label>
                     <input type="text" id="config-model-path" placeholder="Local path or HuggingFace ID" />
                     <span class="form-hint">e.g., google/gemma-3-4b-it or D:\models\gemma-3-4b-it</span>
-                </div>
-                <div class="form-group">
-                    <label for="config-sae-repo">SAE Repository</label>
-                    <input type="text" id="config-sae-repo" placeholder="HuggingFace SAE repo" />
-                    <span class="form-hint">e.g., google/gemma-scope-2-4b-it</span>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
