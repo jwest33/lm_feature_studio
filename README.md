@@ -1,8 +1,10 @@
-# LM Feature Studio
+<div align="center">
+<h1>LM Feature Studio</h1>
 
-Local web interface for exploring Sparse Autoencoder (SAE) features on Gemma models.
+<p>Local web interface for exploring Sparse Autoencoder (SAE) features on Gemma models.</p>
 
 <a href="example.jpg"><img src="example.jpg" alt="example" width="500"></a>
+</div>
 
 ## Features
 
